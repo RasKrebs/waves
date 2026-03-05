@@ -105,7 +105,9 @@ function buildTrayIcon(recording: boolean): Electron.NativeImage {
   const iconName = recording ? 'tray-recording.png' : 'tray-idle.png'
   const iconPath = path.join(__dirname, '../../assets', iconName)
   if (fs.existsSync(iconPath)) {
-    return nativeImage.createFromPath(iconPath).resize({ width: 16, height: 16 })
+    const img = nativeImage.createFromPath(iconPath).resize({ width: 16, height: 16 })
+    if (!recording) img.setTemplateImage(true)
+    return img
   }
   return nativeImage.createEmpty()
 }
@@ -166,7 +168,7 @@ function createMainWindow() {
     titleBarStyle: 'hiddenInset',
     vibrancy: 'under-window',
     visualEffectState: 'active',
-    backgroundColor: '#0000',
+    backgroundColor: '#ffffff00',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
