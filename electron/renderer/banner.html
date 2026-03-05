@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { background: transparent; font-family: -apple-system, BlinkMacSystemFont, sans-serif; }
+    .banner {
+      display: flex; align-items: center; gap: 12px;
+      background: rgba(33, 37, 47, 0.95); border: 1px solid rgba(42, 46, 58, 0.8);
+      border-radius: 12px; padding: 12px 16px;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+      -webkit-app-region: drag;
+      color: #e8eaf0;
+    }
+    .icon {
+      width: 36px; height: 36px; border-radius: 50%;
+      background: rgba(239, 68, 68, 0.15);
+      display: flex; align-items: center; justify-content: center;
+      color: #ef4444; flex-shrink: 0;
+    }
+    .text { flex: 1; }
+    .title { font-size: 13px; font-weight: 500; }
+    .sub { font-size: 11px; color: #7a8099; margin-top: 2px; }
+    .actions { display: flex; gap: 8px; -webkit-app-region: no-drag; }
+    button {
+      padding: 5px 10px; border-radius: 4px; border: none;
+      font-size: 12px; font-weight: 500; cursor: pointer;
+    }
+    .dismiss { background: transparent; color: #7a8099; border: 1px solid #2a2e3a; }
+    .dismiss:hover { background: #1a1d24; color: #e8eaf0; }
+    .record { background: rgba(239,68,68,0.15); color: #ef4444; border: 1px solid rgba(239,68,68,0.3); }
+    .record:hover { background: rgba(239,68,68,0.25); }
+  </style>
+</head>
+<body>
+  <div class="banner">
+    <div class="icon">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+        <path d="M2 5a2 2 0 012-2h8a2 2 0 012 2v4a2 2 0 01-2 2H8l-3 3v-3H4a2 2 0 01-2-2V5z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>
+      </svg>
+    </div>
+    <div class="text">
+      <div class="title" id="title">Meeting detected</div>
+      <div class="sub">Record and transcribe?</div>
+    </div>
+    <div class="actions">
+      <button class="dismiss" id="dismiss">Dismiss</button>
+      <button class="record" id="record">Record</button>
+    </div>
+  </div>
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const app = params.get('app') || 'Meeting';
+    document.getElementById('title').textContent = app + ' meeting detected';
+    document.getElementById('dismiss').addEventListener('click', () => window.waves.bannerDismiss());
+    document.getElementById('record').addEventListener('click', () => window.waves.bannerRecord());
+  </script>
+</body>
+</html>
