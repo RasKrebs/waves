@@ -120,6 +120,27 @@ ensure_whisper() {
   info "Installing whisper-cli to /usr/local/bin/ (requires sudo)..."
   sudo cp "$bin_path" /usr/local/bin/whisper-cli
   sudo chmod +x /usr/local/bin/whisper-cli
+
+  # Copy shared libraries and fix rpaths so the binary doesn't depend on the temp build dir
+  local lib_files
+  lib_files=$(find "$tmp_dir/whisper.cpp/build" -name "libwhisper*.dylib" -o -name "libggml*.dylib" 2>/dev/null)
+  for lib in $lib_files; do
+    sudo cp "$lib" /usr/local/lib/
+  done
+  # Rewrite @rpath references to point to /usr/local/lib
+  for lib_name in libwhisper.1.dylib libggml.0.dylib libggml-cpu.0.dylib libggml-blas.0.dylib libggml-metal.0.dylib libggml-base.0.dylib; do
+    if [[ -f "/usr/local/lib/$lib_name" ]]; then
+      sudo install_name_tool -change "@rpath/$lib_name" "/usr/local/lib/$lib_name" /usr/local/bin/whisper-cli
+    fi
+  done
+  # Also fix inter-library @rpath references
+  for lib_file in /usr/local/lib/libwhisper*.dylib /usr/local/lib/libggml*.dylib; do
+    [[ -f "$lib_file" ]] || continue
+    for lib_name in libwhisper.1.dylib libggml.0.dylib libggml-cpu.0.dylib libggml-blas.0.dylib libggml-metal.0.dylib libggml-base.0.dylib; do
+      sudo install_name_tool -change "@rpath/$lib_name" "/usr/local/lib/$lib_name" "$lib_file" 2>/dev/null || true
+    done
+  done
+
   cd "$PROJECT_DIR"
   ok "whisper-cli installed to /usr/local/bin/whisper-cli"
 }
