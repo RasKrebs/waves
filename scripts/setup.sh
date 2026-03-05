@@ -88,7 +88,7 @@ ensure_blackhole() {
 # --- whisper.cpp ---
 
 ensure_whisper() {
-  if command -v whisper-cli &>/dev/null; then
+  if command -v whisper-cli &>/dev/null && whisper-cli --help &>/dev/null; then
     ok "whisper-cli found ($(which whisper-cli))"
     return
   fi
