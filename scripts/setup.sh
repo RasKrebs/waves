@@ -122,6 +122,7 @@ ensure_whisper() {
   sudo chmod +x /usr/local/bin/whisper-cli
 
   # Copy shared libraries and fix rpaths so the binary doesn't depend on the temp build dir
+  sudo mkdir -p /usr/local/lib
   local lib_files
   lib_files=$(find "$tmp_dir/whisper.cpp/build" -name "libwhisper*.dylib" -o -name "libggml*.dylib" 2>/dev/null)
   for lib in $lib_files; do
