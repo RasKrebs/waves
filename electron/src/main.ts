@@ -7,6 +7,7 @@ import {
   ipcMain,
   shell,
   screen,
+  dialog,
 } from 'electron'
 import path from 'path'
 import { spawn, ChildProcess } from 'child_process'
@@ -27,19 +28,18 @@ let meetingDetector: MeetingDetector
 // -- App bootstrap --
 
 app.whenReady().then(async () => {
-  if (process.platform === 'darwin') app.dock.hide()
-
   await startDaemon()
   daemonClient = new DaemonClient()
 
   createTray()
   createMainWindow()
+  mainWindow?.show()
   setupMeetingDetector()
   setupIpcHandlers()
 })
 
 app.on('window-all-closed', () => {
-  // prevent default quit - app lives in tray
+  // keep running for tray + daemon
 })
 
 app.on('before-quit', () => {
@@ -293,6 +293,22 @@ function setupIpcHandlers() {
     })
   })
   ipcMain.handle('banner:dismiss', () => dismissBanner())
+
+  ipcMain.handle('upload:pick', async () => {
+    const result = await dialog.showOpenDialog(mainWindow!, {
+      title: 'Upload Recording',
+      filters: [
+        { name: 'Audio Files', extensions: ['wav', 'mp3', 'mp4', 'm4a', 'ogg', 'flac', 'webm'] },
+      ],
+      properties: ['openFile'],
+    })
+    if (result.canceled || result.filePaths.length === 0) return null
+    return result.filePaths[0]
+  })
+
+  ipcMain.handle('upload:transcribe', (_, filePath: string, title: string) =>
+    daemonClient.transcribeFile(filePath, title)
+  )
 
   ipcMain.handle('shell:openDataDir', () => {
     shell.openPath(path.join(os.homedir(), 'Library', 'Application Support', 'Waves'))

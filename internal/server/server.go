@@ -398,6 +398,73 @@ func (h *Handler) Summarize(args types.SummarizeArgs, reply *types.SummarizeRepl
 	return nil
 }
 
+// --- TranscribeFile ---
+
+func (h *Handler) TranscribeFile(args types.TranscribeFileArgs, reply *types.TranscribeFileReply) error {
+	if args.FilePath == "" {
+		return fmt.Errorf("file path is required")
+	}
+	if _, err := os.Stat(args.FilePath); err != nil {
+		return fmt.Errorf("file not found: %s", args.FilePath)
+	}
+
+	sessionID := uuid.New().String()
+	title := args.Title
+	if title == "" {
+		title = filepath.Base(args.FilePath)
+	}
+
+	// Copy file to recordings directory
+	destPath := filepath.Join(h.srv.dataDir, "recordings", sessionID+filepath.Ext(args.FilePath))
+	os.MkdirAll(filepath.Dir(destPath), 0755)
+	srcData, err := os.ReadFile(args.FilePath)
+	if err != nil {
+		return fmt.Errorf("read file: %w", err)
+	}
+	if err := os.WriteFile(destPath, srcData, 0644); err != nil {
+		return fmt.Errorf("copy file: %w", err)
+	}
+
+	now := time.Now()
+	sess := store.Session{
+		ID:        sessionID,
+		Title:     title,
+		StartedAt: now,
+		AudioPath: destPath,
+		Status:    "transcribing",
+	}
+	if err := h.srv.db.CreateSession(sess); err != nil {
+		return fmt.Errorf("db error: %w", err)
+	}
+
+	// Transcribe in background
+	go func() {
+		segments, err := h.srv.transcriber.TranscribeFile(context.Background(), destPath, nil)
+		if err != nil {
+			sess.Status = "failed"
+			h.srv.db.UpdateSession(sess)
+			return
+		}
+
+		for _, seg := range segments {
+			h.srv.db.AddSegment(store.Segment{
+				SessionID: sessionID,
+				StartMS:   seg.Start.Milliseconds(),
+				EndMS:     seg.End.Milliseconds(),
+				Text:      seg.Text,
+			})
+		}
+
+		endTime := time.Now()
+		sess.EndedAt = &endTime
+		sess.Status = "done"
+		h.srv.db.UpdateSession(sess)
+	}()
+
+	reply.SessionID = sessionID
+	return nil
+}
+
 // --- GetConfig ---
 
 func (h *Handler) GetConfig(_ types.ConfigArgs, reply *types.ConfigReply) error {

@@ -1,11 +1,12 @@
 import { useEffect, useState } from 'react'
 import { LiveView } from './views/LiveView'
 import { HistoryView } from './views/HistoryView'
+import { UploadView } from './views/UploadView'
 import { ModelsView } from './views/ModelsView'
 import { SettingsView } from './views/SettingsView'
 import { StatusBar, MeetingBanner } from './components/StatusBar'
 
-export type View = 'live' | 'history' | 'models' | 'settings'
+export type View = 'live' | 'history' | 'upload' | 'models' | 'settings'
 
 export default function App() {
   const [view, setView] = useState<View>('live')
@@ -64,6 +65,7 @@ export default function App() {
           {([
             ['live',     'Live',     <WaveIcon />],
             ['history',  'History',  <ClockIcon />],
+            ['upload',   'Upload',   <UploadNavIcon />],
             ['models',   'Models',   <CpuIcon />],
             ['settings', 'Settings', <GearIcon />],
           ] as [View, string, React.ReactNode][]).map(([id, label, icon]) => (
@@ -85,6 +87,7 @@ export default function App() {
       <main className="main-content">
         {view === 'live'     && <LiveView isRecording={isRecording} setIsRecording={setIsRecording} />}
         {view === 'history'  && <HistoryView />}
+        {view === 'upload'   && <UploadView />}
         {view === 'models'   && <ModelsView />}
         {view === 'settings' && <SettingsView />}
       </main>
@@ -122,6 +125,14 @@ function CpuIcon() {
     <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
       <rect x="4" y="4" width="8" height="8" rx="1" stroke="currentColor" strokeWidth="1.4"/>
       <path d="M6 2v2M10 2v2M6 12v2M10 12v2M2 6h2M2 10h2M12 6h2M12 10h2" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/>
+    </svg>
+  )
+}
+function UploadNavIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+      <path d="M8 3v7M5 6l3-3 3 3" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"/>
+      <path d="M3 11v1.5a1.5 1.5 0 001.5 1.5h7a1.5 1.5 0 001.5-1.5V11" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/>
     </svg>
   )
 }

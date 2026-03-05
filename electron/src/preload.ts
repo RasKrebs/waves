@@ -22,6 +22,10 @@ contextBridge.exposeInMainWorld('waves', {
   // Config
   getConfig:      ()                                => ipcRenderer.invoke('config:get'),
 
+  // Upload
+  uploadPick:     ()                                => ipcRenderer.invoke('upload:pick'),
+  uploadTranscribe: (filePath: string, title: string) => ipcRenderer.invoke('upload:transcribe', filePath, title),
+
   // Banner actions
   bannerRecord:   ()                                => ipcRenderer.invoke('banner:record'),
   bannerDismiss:  ()                                => ipcRenderer.invoke('banner:dismiss'),
@@ -63,6 +67,8 @@ declare global {
       getConfig(): Promise<any>
       bannerRecord(): Promise<void>
       bannerDismiss(): Promise<void>
+      uploadPick(): Promise<string | null>
+      uploadTranscribe(filePath: string, title: string): Promise<any>
       openDataDir(): Promise<void>
       openUrl(url: string): Promise<void>
       on(channel: string, cb: (...args: any[]) => void): void
