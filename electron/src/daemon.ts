@@ -84,4 +84,5 @@ export class DaemonClient {
   setModel(name: string)                      { return call<void>('SetModel', { Name: name }) }
   listDevices()                               { return call<{ Devices: Device[] }>('ListDevices') }
   getConfig()                                 { return call<ConfigInfo>('GetConfig') }
+  transcribeFile(filePath: string, title: string) { return call<{ SessionID: string }>('TranscribeFile', { FilePath: filePath, Title: title }) }
 }

@@ -95,6 +95,15 @@ type SummarizeReply struct {
 	Summary string
 }
 
+// TranscribeFile
+type TranscribeFileArgs struct {
+	FilePath string
+	Title    string
+}
+type TranscribeFileReply struct {
+	SessionID string
+}
+
 // Config
 type ConfigArgs struct{}
 type ConfigReply struct {

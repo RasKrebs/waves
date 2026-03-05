@@ -61,6 +61,10 @@ html, body, #root {
   display: flex;
   flex-direction: column;
   padding-top: var(--titlebar-h);
+  -webkit-app-region: drag;
+}
+.sidebar button, .sidebar a, .sidebar input {
+  -webkit-app-region: no-drag;
 }
 
 .main-content {
@@ -472,3 +476,45 @@ html, body, #root {
 .banner-title { font-weight: 500; font-size: 13px; color: var(--text-primary); }
 .banner-sub   { font-size: 11px; color: var(--text-secondary); margin-top: 2px; }
 .banner-actions { display: flex; gap: 8px; }
+
+/* ── Upload ─────────────────────────────────────────────────────────────── */
+
+.upload-drop-zone {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  width: 100%;
+  max-width: 480px;
+  padding: 48px 32px;
+  border: 2px dashed var(--border);
+  border-radius: var(--radius-lg);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.upload-drop-zone:hover,
+.upload-drop-zone.dragging {
+  border-color: var(--accent);
+  background: var(--accent-glow);
+}
+
+.upload-file-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: var(--bg-surface);
+}
+
+.upload-result {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: var(--bg-raised);
+}
