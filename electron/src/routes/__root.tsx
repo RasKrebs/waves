@@ -16,11 +16,11 @@ export const Route = createRootRoute({
 function RootLayout() {
   return (
     <>
-      <div className="titlebar-drag h-[var(--titlebar-height)] fixed top-0 left-0 right-0 z-[100]" />
+      <div className="bg-sidebar titlebar-drag h-[var(--titlebar-height)] fixed top-0 left-0 right-0 z-[100] --font-sans" />
       <div className="pt-[var(--titlebar-height)] h-screen flex flex-col overflow-hidden">
         <SidebarProvider className="flex-1 min-h-0">
-          <AppSidebar />
-          <SidebarInset className="flex flex-col min-h-0 max-h-full overflow-hidden">
+          <AppSidebar collapsible="icon" />
+          <SidebarInset cfont-sanslassName="flex flex-col min-h-0 max-h-full overflow-hidden">
             <header className="flex h-16 shrink-0 items-center gap-2 titlebar-no-drag">
               <div className="flex items-center gap-2 px-4">
                 <SidebarTrigger className="-ml-1" />

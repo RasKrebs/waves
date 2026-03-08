@@ -13,7 +13,8 @@ from pathlib import Path
 from typing import Any
 
 from waves.audio import AudioCapture, finalize_wav_header, write_wav_header
-from waves.config import Config
+from waves.config import Config, update as update_config
+from waves.pipeline.summarize import run_workflow
 from waves.store import Segment, Session, Store
 
 log = logging.getLogger(__name__)
@@ -41,8 +42,9 @@ class WavesServer:
         self.start_time = time.time()
         self._active: ActiveSession | None = None
         self._lock = asyncio.Lock()
-        # Transcription provider (set after init)
+        # Providers (set after init by __main__.py)
         self.transcriber: Any = None
+        self.llm: Any = None
 
     async def serve(self) -> None:
         """Start the Unix socket JSON-RPC server."""
@@ -111,6 +113,9 @@ class WavesServer:
             "Waves.PullModel": self._pull_model,
             "Waves.Summarize": self._summarize,
             "Waves.TranscribeFile": self._transcribe_file,
+            "Waves.RetranscribeSession": self._retranscribe_session,
+            "Waves.RenameSession": self._rename_session,
+            "Waves.SetConfig": self._set_config,
         }
         handler = handlers.get(method)
         if not handler:
@@ -150,9 +155,49 @@ class WavesServer:
         workflow_names = list(self.config.workflows.keys())
         return {
             "TranscriptionProvider": self.config.transcription.provider,
+            "TranscriptionLanguage": self.config.transcription.language,
             "SummarizationProvider": self.config.summarization.provider,
             "Workflows": workflow_names,
         }
+
+    async def _set_config(self, args: dict) -> dict:
+        """Update config, save to YAML, and hot-swap providers if changed."""
+        changes = args.get("Config", {})
+        if not changes:
+            return {}
+
+        old_transcription = self.config.transcription.provider
+        old_summarization = self.config.summarization.provider
+
+        update_config(self.config, changes)
+        log.info("Config updated and saved")
+
+        # Hot-swap transcription provider if it changed
+        new_transcription = self.config.transcription.provider
+        if new_transcription != old_transcription:
+            try:
+                from waves.providers.registry import resolve_transcription
+                self.transcriber = resolve_transcription(new_transcription, self.config)
+                log.info("Switched transcription to: %s", self.transcriber.name)
+            except Exception as e:
+                # Revert in-memory provider so old one keeps working
+                log.warning("Could not switch transcription provider: %s", e)
+                self.config.transcription.provider = old_transcription
+                return {"Error": str(e)}
+
+        # Hot-swap LLM provider if it changed
+        new_summarization = self.config.summarization.provider
+        if new_summarization != old_summarization:
+            try:
+                from waves.providers.registry import resolve_llm
+                self.llm = resolve_llm(new_summarization, self.config)
+                log.info("Switched LLM to: %s", self.llm.name)
+            except Exception as e:
+                log.warning("Could not switch LLM provider: %s", e)
+                self.config.summarization.provider = old_summarization
+                return {"Error": str(e)}
+
+        return {}
 
     async def _list_sessions(self, args: dict) -> dict:
         limit = args.get("Limit", 20)
@@ -201,6 +246,7 @@ class WavesServer:
                 "Duration": dur,
                 "Summary": sess.summary,
                 "Segments": segments,
+                "AudioPath": sess.audio_path or "",
             }
         }
 
@@ -330,10 +376,39 @@ class WavesServer:
         return {"Devices": devices}
 
     async def _list_models(self, args: dict) -> dict:
-        if self.transcriber and hasattr(self.transcriber, "list_models"):
-            models = await self.transcriber.list_models()
-            return {"Models": models}
-        return {"Models": []}
+        models = []
+        model_dir = Path(self.data_dir) / "models"
+
+        if model_dir.exists():
+            # GGUF/bin files (whisper.cpp models)
+            for f in sorted(model_dir.iterdir()):
+                if f.is_file() and f.suffix in (".bin", ".gguf"):
+                    size_gb = f.stat().st_size / (1024**3)
+                    models.append({
+                        "Name": f.stem,
+                        "Type": "whisper.cpp",
+                        "Size": f"{size_gb:.1f} GB",
+                        "Active": self.transcriber and hasattr(self.transcriber, "_active_model")
+                                  and str(f) == self.transcriber._active_model,
+                    })
+
+            # Transformers model directories (have config.json)
+            for d in sorted(model_dir.iterdir()):
+                if d.is_dir() and (d / "config.json").exists():
+                    total = sum(f.stat().st_size for f in d.rglob("*") if f.is_file())
+                    size_gb = total / (1024**3)
+                    # Convert dir name back to HF repo format: org--model → org/model
+                    hf_name = d.name.replace("--", "/")
+                    is_active = (self.transcriber and hasattr(self.transcriber, "_model_id")
+                                 and self.transcriber._model_id == hf_name)
+                    models.append({
+                        "Name": hf_name,
+                        "Type": "transformers",
+                        "Size": f"{size_gb:.1f} GB",
+                        "Active": is_active,
+                    })
+
+        return {"Models": models}
 
     async def _set_model(self, args: dict) -> dict:
         name = args.get("Name", "")
@@ -349,15 +424,93 @@ class WavesServer:
         repo = args.get("Repo", "")
         if not repo:
             raise ValueError("repo required")
-        # TODO: implement HuggingFace model download
-        raise ValueError("model download not yet implemented in Python backend")
+
+        from huggingface_hub import list_repo_files, snapshot_download, hf_hub_download
+
+        model_dir = Path(self.data_dir) / "models"
+        model_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            files = list_repo_files(repo)
+        except Exception as e:
+            raise ValueError(f"could not list repo {repo!r}: {e}")
+
+        # Check what kind of model this is
+        gguf_files = [f for f in files if f.endswith((".gguf", ".bin"))]
+        is_transformers = any(f == "config.json" for f in files)
+
+        if gguf_files:
+            # GGUF/bin model — download the single model file
+            target = gguf_files[0]
+            log.info("Downloading GGUF model %s from %s", target, repo)
+
+            local_path = await asyncio.to_thread(
+                hf_hub_download,
+                repo_id=repo,
+                filename=target,
+                local_dir=str(model_dir),
+            )
+
+            size_gb = Path(local_path).stat().st_size / (1024**3)
+            name = Path(local_path).stem
+            log.info("Downloaded %s (%.1f GB)", name, size_gb)
+            return {"Name": name, "Size": f"{size_gb:.1f} GB"}
+
+        elif is_transformers:
+            # Transformers model — download full repo snapshot
+            log.info("Downloading transformers model %s", repo)
+
+            local_path = await asyncio.to_thread(
+                snapshot_download,
+                repo_id=repo,
+                local_dir=str(model_dir / repo.replace("/", "--")),
+            )
+
+            # Estimate size from downloaded files
+            total = sum(
+                f.stat().st_size for f in Path(local_path).rglob("*") if f.is_file()
+            )
+            size_gb = total / (1024**3)
+            name = repo
+            log.info("Downloaded %s (%.1f GB)", name, size_gb)
+            return {"Name": name, "Size": f"{size_gb:.1f} GB"}
+
+        else:
+            raise ValueError(
+                f"no supported model files found in {repo!r} "
+                f"(expected .gguf, .bin, or config.json for transformers)"
+            )
 
     async def _summarize(self, args: dict) -> dict:
         session_id = args.get("SessionID", "")
+        workflow_name = args.get("Workflow", "default")
         if not session_id:
             raise ValueError("session ID required")
-        # TODO: implement summarization
-        raise ValueError("summarization not yet implemented in Python backend")
+        if not self.llm:
+            raise ValueError("no LLM provider configured — set summarization.provider in config")
+
+        sess = await self.store.get_session(session_id)
+        if not sess:
+            raise ValueError(f"session not found: {session_id}")
+
+        transcript = await self.store.full_transcript(session_id)
+        if not transcript:
+            raise ValueError("session has no transcript segments")
+
+        workflow = self.config.workflows.get(workflow_name)
+        if not workflow:
+            raise ValueError(
+                f"workflow {workflow_name!r} not found, "
+                f"available: {', '.join(self.config.workflows)}"
+            )
+
+        summary = await run_workflow(self.llm, workflow, transcript)
+
+        # Persist summary
+        sess.summary = summary
+        await self.store.update_session(sess)
+
+        return {"Summary": summary}
 
     async def _transcribe_file(self, args: dict) -> dict:
         file_path = args.get("FilePath", "")
@@ -366,8 +519,128 @@ class WavesServer:
             raise ValueError("file path required")
         if not Path(file_path).exists():
             raise ValueError(f"file not found: {file_path}")
-        # TODO: implement file transcription
-        raise ValueError("file transcription not yet implemented in Python backend")
+        if not self.transcriber:
+            raise ValueError("no transcription provider configured")
+
+        session_id = str(uuid.uuid4())
+        now_ms = int(time.time() * 1000)
+        sess = Session(
+            id=session_id,
+            title=title or Path(file_path).stem,
+            started_at=now_ms,
+            audio_path=file_path,
+            status="transcribing",
+        )
+        await self.store.create_session(sess)
+
+        try:
+            segments = await self.transcriber.transcribe_file(
+                Path(file_path),
+                self.config.transcription.language,
+            )
+            for seg in segments:
+                await self.store.add_segment(Segment(
+                    id=0,
+                    session_id=session_id,
+                    start_ms=seg.start_ms,
+                    end_ms=seg.end_ms,
+                    text=seg.text,
+                ))
+
+            sess.status = "done"
+            sess.ended_at = int(time.time() * 1000)
+            await self.store.update_session(sess)
+            log.info("Transcribed file %s: %d segments", file_path, len(segments))
+        except Exception:
+            sess.status = "failed"
+            await self.store.update_session(sess)
+            raise
+
+        return {"SessionID": session_id}
+
+    async def _retranscribe_session(self, args: dict) -> dict:
+        session_id = args.get("SessionID", "")
+        if not session_id:
+            raise ValueError("session ID required")
+        if not self.transcriber:
+            raise ValueError("no transcription provider configured")
+
+        sess = await self.store.get_session(session_id)
+        if not sess:
+            raise ValueError(f"session not found: {session_id}")
+        if not sess.audio_path or not Path(sess.audio_path).exists():
+            raise ValueError("session has no audio file")
+
+        # Clear old segments
+        deleted = await self.store.delete_segments(session_id)
+        log.info("Cleared %d old segments for session %s", deleted, session_id)
+
+        sess.status = "transcribing"
+        sess.summary = ""
+        await self.store.update_session(sess)
+
+        try:
+            segments = await self.transcriber.transcribe_file(
+                Path(sess.audio_path),
+                self.config.transcription.language,
+            )
+            for seg in segments:
+                await self.store.add_segment(Segment(
+                    id=0,
+                    session_id=session_id,
+                    start_ms=seg.start_ms,
+                    end_ms=seg.end_ms,
+                    text=seg.text,
+                ))
+
+            sess.status = "done"
+            await self.store.update_session(sess)
+            log.info("Retranscribed session %s: %d segments", session_id, len(segments))
+        except Exception:
+            sess.status = "failed"
+            await self.store.update_session(sess)
+            raise
+
+        return {"Segments": len(segments)}
+
+    async def _rename_session(self, args: dict) -> dict:
+        session_id = args.get("SessionID", "")
+        title = args.get("Title", "")
+        if not session_id:
+            raise ValueError("session ID required")
+        if not title:
+            raise ValueError("title required")
+
+        sess = await self.store.get_session(session_id)
+        if not sess:
+            raise ValueError(f"session not found: {session_id}")
+
+        sess.title = title
+
+        # Rename audio file to match title
+        if sess.audio_path and Path(sess.audio_path).exists():
+            old_path = Path(sess.audio_path)
+            slug = title.lower().replace(" ", "-")
+            # Remove non-alphanumeric chars except hyphens
+            slug = "".join(c for c in slug if c.isalnum() or c == "-")
+            slug = slug.strip("-")
+            new_name = f"{slug}{old_path.suffix}"
+            new_path = old_path.parent / new_name
+
+            # Avoid overwriting existing files
+            if new_path != old_path:
+                counter = 1
+                base_path = new_path
+                while new_path.exists():
+                    new_path = base_path.with_stem(f"{base_path.stem}-{counter}")
+                    counter += 1
+
+                old_path.rename(new_path)
+                sess.audio_path = str(new_path)
+                log.info("Renamed audio: %s -> %s", old_path.name, new_path.name)
+
+        await self.store.update_session(sess)
+        return {"AudioPath": sess.audio_path}
 
 
 # -- Helpers --

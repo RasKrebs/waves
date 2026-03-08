@@ -70,7 +70,7 @@ export interface SessionDetail {
 
 export interface ModelRow { Name: string; Type: string; Size: string; Active: boolean }
 export interface Device   { UID: string; Name: string }
-export interface ConfigInfo { TranscriptionProvider: string; SummarizationProvider: string; Workflows: string[] }
+export interface ConfigInfo { TranscriptionProvider: string; TranscriptionLanguage: string; SummarizationProvider: string; Workflows: string[] }
 
 // -- Client --
 
@@ -86,5 +86,8 @@ export class DaemonClient {
   setModel(name: string)                      { return call<void>('SetModel', { Name: name }) }
   listDevices()                               { return call<{ Devices: Device[] }>('ListDevices') }
   getConfig()                                 { return call<ConfigInfo>('GetConfig') }
+  setConfig(config: Record<string, unknown>)  { return call<void>('SetConfig', { Config: config }) }
   transcribeFile(filePath: string, title: string) { return call<{ SessionID: string }>('TranscribeFile', { FilePath: filePath, Title: title }) }
+  retranscribeSession(sessionId: string)         { return call<{ Segments: number }>('RetranscribeSession', { SessionID: sessionId }) }
+  renameSession(sessionId: string, title: string) { return call<{ AudioPath: string }>('RenameSession', { SessionID: sessionId, Title: title }) }
 }

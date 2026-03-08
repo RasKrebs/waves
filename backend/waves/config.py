@@ -53,10 +53,17 @@ class ClaudeConfig:
 
 
 @dataclass
+class OllamaConfig:
+    model: str = "llama3.2"
+    url: str = "http://localhost:11434"
+
+
+@dataclass
 class SummarizationConfig:
-    provider: str = "claude"
+    provider: str = "anthropic"
     claude: ClaudeConfig = field(default_factory=ClaudeConfig)
     openai: APIConfig = field(default_factory=APIConfig)
+    ollama: OllamaConfig = field(default_factory=OllamaConfig)
     llama: APIConfig = field(default_factory=APIConfig)
     rest_api: RestAPIConfig = field(default_factory=RestAPIConfig)
 
@@ -123,11 +130,75 @@ def _merge_dataclass(dc: object, raw: dict) -> None:
         f = known[attr]
         current = getattr(dc, attr)
         if isinstance(current, (WhisperConfig, APIConfig, CommandConfig, RestAPIConfig,
-                                ClaudeConfig, TranscriptionConfig, SummarizationConfig)):
+                                ClaudeConfig, OllamaConfig, TranscriptionConfig,
+                                SummarizationConfig)):
             if isinstance(val, dict):
                 _merge_dataclass(current, val)
         else:
             setattr(dc, attr, val)
+
+
+def _dataclass_to_dict(dc: object) -> dict:
+    """Convert a dataclass to a plain dict (recursive), skipping default/empty values."""
+    from dataclasses import fields as dc_fields, is_dataclass
+    result = {}
+    for f in dc_fields(dc):
+        val = getattr(dc, f.name)
+        if is_dataclass(val):
+            nested = _dataclass_to_dict(val)
+            if nested:  # only include if non-empty
+                result[f.name] = nested
+        elif isinstance(val, dict):
+            if val:
+                result[f.name] = val
+        elif isinstance(val, list):
+            if val:
+                result[f.name] = val
+        elif val not in (None, "", 0, False):
+            result[f.name] = val
+    return result
+
+
+def _deep_merge(base: dict, overlay: dict) -> dict:
+    """Recursively merge overlay into base (mutates base)."""
+    for key, val in overlay.items():
+        if isinstance(val, dict) and isinstance(base.get(key), dict):
+            _deep_merge(base[key], val)
+        else:
+            base[key] = val
+    return base
+
+
+def save_partial(changes: dict, path: Path | None = None) -> None:
+    """Merge partial changes into the YAML config file."""
+    path = path or default_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    existing: dict = {}
+    if path.exists():
+        with open(path) as f:
+            existing = yaml.safe_load(f) or {}
+
+    _deep_merge(existing, changes)
+
+    with open(path, "w") as f:
+        yaml.dump(existing, f, default_flow_style=False, sort_keys=False)
+
+
+def update(cfg: Config, changes: dict) -> None:
+    """Apply a partial update dict to a Config and persist to YAML.
+
+    Expected shape matches the YAML structure:
+    {
+        "transcription": {"provider": "huggingface|model", "language": "da"},
+        "summarization": {"provider": "claude", "claude": {"api_key": "sk-..."}},
+    }
+    """
+    if "transcription" in changes and isinstance(changes["transcription"], dict):
+        _merge_dataclass(cfg.transcription, changes["transcription"])
+    if "summarization" in changes and isinstance(changes["summarization"], dict):
+        _merge_dataclass(cfg.summarization, changes["summarization"])
+    save_partial(changes)
 
 
 def load(path: Path | None = None) -> Config:

@@ -36,10 +36,11 @@ test.*
 .claude/worktrees/
 
 # Python
-__pycache__/
+*/__pycache__/
 *.pyc
 .venv/
 
 # Binaries (root level, built outside build/)
 /waves
 /wavesd
+styling

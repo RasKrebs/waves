@@ -7,6 +7,8 @@ import {
   ipcMain,
   shell,
   dialog,
+  protocol,
+  net,
 } from 'electron'
 import path from 'path'
 import { spawn, ChildProcess } from 'child_process'
@@ -22,9 +24,69 @@ let daemon: ChildProcess | null = null
 let daemonClient: DaemonClient
 let isQuitting = false
 
+// -- Daemon health tracking --
+type DaemonState = 'running' | 'stopped' | 'starting'
+let daemonState: DaemonState = 'stopped'
+const daemonLogs: string[] = []
+const MAX_LOG_LINES = 500
+
+function pushLog(line: string) {
+  const ts = new Date().toISOString().slice(11, 19)
+  daemonLogs.push(`[${ts}] ${line}`)
+  if (daemonLogs.length > MAX_LOG_LINES) daemonLogs.splice(0, daemonLogs.length - MAX_LOG_LINES)
+}
+
+function setDaemonState(state: DaemonState) {
+  daemonState = state
+  pushLog(`State → ${state}`)
+  mainWindow?.webContents.send('daemon:state', state)
+}
+
+// -- Custom protocol for serving local audio files --
+// Register before app is ready
+protocol.registerSchemesAsPrivileged([
+  { scheme: 'waves-audio', privileges: { stream: true, supportFetchAPI: true, bypassCSP: true } },
+])
+
 // -- App bootstrap --
 
 app.whenReady().then(async () => {
+  // Handle waves-audio:// URLs → local file access for the renderer
+  protocol.handle('waves-audio', (request) => {
+    const filePath = decodeURIComponent(request.url.replace('waves-audio://file/', '/'))
+    const stat = fs.statSync(filePath)
+    const fileSize = stat.size
+    const rangeHeader = request.headers.get('range')
+
+    if (rangeHeader) {
+      // Range request — required for audio seeking/duration
+      const match = rangeHeader.match(/bytes=(\d+)-(\d*)/)
+      const start = match ? parseInt(match[1], 10) : 0
+      const end = match && match[2] ? parseInt(match[2], 10) : fileSize - 1
+      const chunk = fs.readFileSync(filePath).subarray(start, end + 1)
+
+      return new Response(chunk, {
+        status: 206,
+        headers: {
+          'Content-Type': 'audio/wav',
+          'Content-Length': String(chunk.length),
+          'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+          'Accept-Ranges': 'bytes',
+        },
+      })
+    }
+
+    // Full file request
+    const data = fs.readFileSync(filePath)
+    return new Response(data, {
+      status: 200,
+      headers: {
+        'Content-Type': 'audio/wav',
+        'Content-Length': String(fileSize),
+        'Accept-Ranges': 'bytes',
+      },
+    })
+  })
   await startDaemon()
   daemonClient = new DaemonClient()
 
@@ -59,6 +121,8 @@ function findUv(): string {
 }
 
 async function startDaemon() {
+  setDaemonState('starting')
+
   // Python backend via uv
   const backendDir = isDev
     ? path.join(__dirname, '../../../backend')
@@ -67,7 +131,10 @@ async function startDaemon() {
   const uvBin = findUv()
 
   if (!fs.existsSync(backendDir)) {
-    console.warn('[waves] backend directory not found at', backendDir)
+    const msg = `backend directory not found at ${backendDir}`
+    console.warn('[waves]', msg)
+    pushLog(msg)
+    setDaemonState('stopped')
     return
   }
 
@@ -78,17 +145,29 @@ async function startDaemon() {
     env: { ...process.env, PYTHONUNBUFFERED: '1' },
   })
 
-  daemon.stdout?.on('data', (d: Buffer) => console.log('[waves-py]', d.toString().trim()))
-  daemon.stderr?.on('data', (d: Buffer) => console.error('[waves-py]', d.toString().trim()))
+  daemon.stdout?.on('data', (d: Buffer) => {
+    const line = d.toString().trim()
+    console.log('[waves-py]', line)
+    pushLog(line)
+  })
+  daemon.stderr?.on('data', (d: Buffer) => {
+    const line = d.toString().trim()
+    console.error('[waves-py]', line)
+    pushLog(line)
+  })
 
   daemon.on('exit', (code: number | null) => {
-    console.log(`[waves-py] exited with code ${code}`)
+    const msg = `exited with code ${code}`
+    console.log(`[waves-py] ${msg}`)
+    pushLog(msg)
+    setDaemonState('stopped')
     if (!isQuitting) {
       setTimeout(() => startDaemon(), 2000)
     }
   })
 
   await waitForDaemon(5000)
+  if (daemonState !== 'stopped') setDaemonState('running')
 }
 
 async function waitForDaemon(timeoutMs: number) {
@@ -238,6 +317,9 @@ function setupIpcHandlers() {
   ipcMain.handle('models:set', (_, name: string) => daemonClient.setModel(name))
   ipcMain.handle('devices:list', () => daemonClient.listDevices())
   ipcMain.handle('config:get', () => daemonClient.getConfig())
+  ipcMain.handle('config:set', (_, config: Record<string, unknown>) => daemonClient.setConfig(config))
+  ipcMain.handle('sessions:retranscribe', (_, id: string) => daemonClient.retranscribeSession(id))
+  ipcMain.handle('sessions:rename', (_, id: string, title: string) => daemonClient.renameSession(id, title))
 
   ipcMain.handle('upload:pick', async () => {
     const result = await dialog.showOpenDialog(mainWindow!, {
@@ -255,9 +337,27 @@ function setupIpcHandlers() {
     daemonClient.transcribeFile(filePath, title)
   )
 
+  ipcMain.handle('audio:url', (_, audioPath: string) => {
+    if (!audioPath || !fs.existsSync(audioPath)) return null
+    // Return a waves-audio:// URL the renderer can use in <audio src>
+    return `waves-audio://file${audioPath}`
+  })
+
   ipcMain.handle('shell:openDataDir', () => {
     shell.openPath(path.join(os.homedir(), 'Library', 'Application Support', 'Waves'))
   })
 
   ipcMain.handle('shell:openUrl', (_, url: string) => shell.openExternal(url))
+
+  // -- Daemon management --
+  ipcMain.handle('daemon:state', () => daemonState)
+  ipcMain.handle('daemon:logs', () => [...daemonLogs])
+  ipcMain.handle('daemon:restart', async () => {
+    pushLog('Manual restart requested')
+    daemon?.kill()
+    // Wait a tick for cleanup, then start fresh
+    await new Promise((r) => setTimeout(r, 500))
+    await startDaemon()
+    return daemonState
+  })
 }

@@ -1,7 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router"
 import { useState, useEffect, useRef, useCallback } from "react"
-import { Button } from "@/components/ui/button"
-import { Circle, Square, Pause, Play } from "lucide-react"
+import { Square } from "lucide-react"
 
 export const Route = createFileRoute("/record")({
   component: RecordPage,
@@ -20,10 +19,21 @@ function formatTime(seconds: number): string {
   return `${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")},${cs.toString().padStart(2, "0")}`
 }
 
-function Waveform({ active }: { active: boolean }) {
+const RING_COUNT = 6
+const ACCENT = [96, 165, 250] // blue-400
+
+function CoreCanvas({
+  active,
+  hover,
+}: {
+  active: boolean
+  hover: boolean
+}) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
-  const barsRef = useRef<number[]>(Array(80).fill(0))
   const animRef = useRef<number>(0)
+  const levelRef = useRef(0)
+  const ringsRef = useRef<number[]>(Array(RING_COUNT).fill(0))
+  const phaseRef = useRef(0)
 
   const draw = useCallback(() => {
     const canvas = canvasRef.current
@@ -39,40 +49,93 @@ function Waveform({ active }: { active: boolean }) {
 
     const w = rect.width
     const h = rect.height
-    const bars = barsRef.current
-    const barCount = bars.length
-    const barWidth = 3
-    const gap = (w - barCount * barWidth) / (barCount - 1)
-    const centerY = h / 2
+    const cx = w / 2
+    const cy = h / 2
+    const maxR = Math.min(w, h) / 2
 
     ctx.clearRect(0, 0, w, h)
 
-    // Shift bars left and add new one
-    if (active) {
-      bars.shift()
-      const amplitude = 0.15 + Math.random() * 0.7
-      bars.push(amplitude)
-    } else {
-      // Decay existing bars
-      for (let i = 0; i < barCount; i++) {
-        bars[i] *= 0.95
-      }
+    // Simulate audio level with smoothed noise
+    const target = active ? 0.3 + Math.random() * 0.7 : 0
+    levelRef.current += (target - levelRef.current) * 0.12
+    const level = levelRef.current
+
+    phaseRef.current += 0.02
+
+    // Update ring amplitudes (each ring reacts with slight delay)
+    const rings = ringsRef.current
+    for (let i = 0; i < RING_COUNT; i++) {
+      const delayed = level * (1 - i * 0.1)
+      rings[i] += (Math.max(0, delayed) - rings[i]) * (0.15 - i * 0.015)
     }
 
-    for (let i = 0; i < barCount; i++) {
-      const x = i * (barWidth + gap)
-      const barH = Math.max(2, bars[i] * h * 0.8)
+    // Draw rings from outermost to innermost
+    for (let i = RING_COUNT - 1; i >= 0; i--) {
+      const t = i / RING_COUNT
+      const baseR = maxR * 0.25 + maxR * 0.55 * t
+      const pulse = rings[i] * maxR * 0.12
+      const wobble =
+        Math.sin(phaseRef.current * (1.5 + i * 0.3) + i * 1.2) *
+        rings[i] *
+        maxR *
+        0.04
+      const r = baseR + pulse + wobble
 
-      ctx.fillStyle = active
-        ? "rgba(255, 255, 255, 0.8)"
-        : "rgba(255, 255, 255, 0.3)"
+      const alpha = active
+        ? 0.08 + rings[i] * 0.25
+        : hover
+          ? 0.06
+          : 0.03
+
       ctx.beginPath()
-      ctx.roundRect(x, centerY - barH / 2, barWidth, barH, 1.5)
-      ctx.fill()
+      ctx.arc(cx, cy, Math.max(0, r), 0, Math.PI * 2)
+      ctx.strokeStyle = `rgba(${ACCENT[0]}, ${ACCENT[1]}, ${ACCENT[2]}, ${alpha})`
+      ctx.lineWidth = 1.5 + rings[i] * 2
+      ctx.stroke()
     }
+
+    // Inner glow
+    const glowR = maxR * 0.22 + level * maxR * 0.06
+    const glowAlpha = active ? 0.12 + level * 0.2 : hover ? 0.06 : 0.03
+    const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, glowR * 2.5)
+    grad.addColorStop(
+      0,
+      `rgba(${ACCENT[0]}, ${ACCENT[1]}, ${ACCENT[2]}, ${glowAlpha})`,
+    )
+    grad.addColorStop(1, `rgba(${ACCENT[0]}, ${ACCENT[1]}, ${ACCENT[2]}, 0)`)
+    ctx.fillStyle = grad
+    ctx.fillRect(0, 0, w, h)
+
+    // Core circle
+    const coreR = maxR * 0.18 + level * maxR * 0.04
+    const coreAlpha = active ? 0.6 + level * 0.35 : hover ? 0.3 : 0.15
+    const coreGrad = ctx.createRadialGradient(
+      cx,
+      cy,
+      0,
+      cx,
+      cy,
+      coreR,
+    )
+    coreGrad.addColorStop(
+      0,
+      `rgba(${ACCENT[0]}, ${ACCENT[1]}, ${ACCENT[2]}, ${coreAlpha})`,
+    )
+    coreGrad.addColorStop(
+      0.7,
+      `rgba(${ACCENT[0]}, ${ACCENT[1]}, ${ACCENT[2]}, ${coreAlpha * 0.5})`,
+    )
+    coreGrad.addColorStop(
+      1,
+      `rgba(${ACCENT[0]}, ${ACCENT[1]}, ${ACCENT[2]}, 0)`,
+    )
+    ctx.beginPath()
+    ctx.arc(cx, cy, coreR, 0, Math.PI * 2)
+    ctx.fillStyle = coreGrad
+    ctx.fill()
 
     animRef.current = requestAnimationFrame(draw)
-  }, [active])
+  }, [active, hover])
 
   useEffect(() => {
     animRef.current = requestAnimationFrame(draw)
@@ -80,11 +143,7 @@ function Waveform({ active }: { active: boolean }) {
   }, [draw])
 
   return (
-    <canvas
-      ref={canvasRef}
-      className="w-full h-full"
-      style={{ imageRendering: "pixelated" }}
-    />
+    <canvas ref={canvasRef} className="absolute inset-0 w-full h-full" />
   )
 }
 
@@ -93,9 +152,9 @@ function RecordPage() {
   const [elapsed, setElapsed] = useState(0)
   const [sessionId, setSessionId] = useState<string | null>(null)
   const [daemonConnected, setDaemonConnected] = useState(false)
+  const [hover, setHover] = useState(false)
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
-  // Check daemon status on mount
   useEffect(() => {
     window.waves?.getStatus()
       .then((status) => {
@@ -108,7 +167,6 @@ function RecordPage() {
       .catch(() => setDaemonConnected(false))
   }, [])
 
-  // Timer
   useEffect(() => {
     if (state === "recording") {
       timerRef.current = setInterval(() => {
@@ -122,7 +180,6 @@ function RecordPage() {
     }
   }, [state])
 
-  // Listen for external recording events (tray, meeting detection)
   useEffect(() => {
     const onStarted = () => {
       setState("recording")
@@ -163,83 +220,41 @@ function RecordPage() {
     }
   }
 
+  const isRecording = state === "recording"
+
   return (
-    <div className="flex flex-col h-full">
-      {/* Waveform area */}
-      <div className="flex-1 flex flex-col items-center justify-center min-h-0">
-        <div className="w-full h-32 px-4">
-          <Waveform active={state === "recording"} />
-        </div>
+    <div className="flex flex-col h-full items-center justify-center gap-6 p-6">
+      {/* Core visualization square */}
+      <button
+        className="relative aspect-square w-full max-w-[320px] rounded-2xl border border-border/50 bg-card/50 overflow-hidden cursor-pointer transition-colors hover:border-border disabled:cursor-not-allowed disabled:opacity-50"
+        onClick={isRecording ? handleStop : handleRecord}
+        onMouseEnter={() => setHover(true)}
+        onMouseLeave={() => setHover(false)}
+        disabled={!daemonConnected}
+      >
+        <CoreCanvas active={isRecording} hover={hover} />
 
-        {/* Timeline ticks */}
-        {state !== "idle" && (
-          <div className="w-full px-4 mt-2">
-            <div className="h-px bg-muted-foreground/20 w-full relative">
-              <div
-                className="absolute top-0 w-0.5 h-3 -translate-y-1/2 bg-blue-500 rounded-full"
-                style={{ left: "50%" }}
-              />
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* Timer + controls */}
-      <div className="shrink-0 flex flex-col items-center gap-6 pb-8">
-        {/* Timer display */}
-        <div className="tabular-nums text-4xl font-light tracking-wider text-foreground/90">
-          {formatTime(elapsed)}
-        </div>
-
-        {/* Control buttons */}
-        <div className="flex items-center gap-6">
-          {state === "idle" ? (
-            <Button
-              size="lg"
-              className="h-16 w-16 rounded-full bg-red-600 hover:bg-red-700 text-white shadow-lg shadow-red-900/30"
-              onClick={handleRecord}
-              disabled={!daemonConnected}
-            >
-              <Circle className="size-6 fill-current" />
-            </Button>
+        {/* Center icon overlay */}
+        <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+          {isRecording ? (
+            <Square className="size-5 text-blue-400/80 fill-blue-400/80" />
           ) : (
-            <>
-              <Button
-                size="lg"
-                variant="outline"
-                className="h-12 w-12 rounded-full"
-                onClick={handleStop}
-              >
-                <Square className="size-4 fill-current" />
-              </Button>
-              <Button
-                size="lg"
-                className={`h-16 w-16 rounded-full shadow-lg ${
-                  state === "recording"
-                    ? "bg-red-600 hover:bg-red-700 text-white shadow-red-900/30 animate-pulse"
-                    : "bg-red-600 hover:bg-red-700 text-white shadow-red-900/30"
-                }`}
-                disabled
-              >
-                {state === "recording" ? (
-                  <Pause className="size-6 fill-current" />
-                ) : (
-                  <Play className="size-6 fill-current ml-0.5" />
-                )}
-              </Button>
-            </>
+            <div className="size-4 rounded-full bg-blue-400/60" />
           )}
         </div>
+      </button>
 
-        {/* Status line */}
+      {/* Timer + status */}
+      <div className="flex flex-col items-center gap-2">
+        <div className="tabular-nums text-3xl font-light tracking-wider text-foreground/90">
+          {formatTime(elapsed)}
+        </div>
         <p className="text-xs text-muted-foreground">
           {!daemonConnected
-            ? "Daemon not connected — run make build first"
-            : state === "idle"
-              ? "Ready to record"
-              : state === "recording"
-                ? "Recording..."
-                : "Paused"}
+            ? "Daemon not connected"
+            : isRecording
+              ? "Recording..."
+              : "Ready to record"}
         </p>
       </div>
     </div>

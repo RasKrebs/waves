@@ -77,10 +77,19 @@ class Store:
     async def update_session(self, sess: Session) -> None:
         assert self._db
         await self._db.execute(
-            "UPDATE sessions SET title=?, ended_at=?, status=?, summary=?, model_used=? WHERE id=?",
-            (sess.title, sess.ended_at, sess.status, sess.summary, sess.model_used, sess.id),
+            "UPDATE sessions SET title=?, ended_at=?, audio_path=?, status=?, summary=?, model_used=? WHERE id=?",
+            (sess.title, sess.ended_at, sess.audio_path, sess.status, sess.summary, sess.model_used, sess.id),
         )
         await self._db.commit()
+
+    async def delete_segments(self, session_id: str) -> int:
+        assert self._db
+        async with self._db.execute(
+            "DELETE FROM segments WHERE session_id = ?", (session_id,)
+        ) as cur:
+            count = cur.rowcount
+        await self._db.commit()
+        return count
 
     async def get_session(self, id_prefix: str) -> Session | None:
         assert self._db

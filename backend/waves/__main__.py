@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import signal
 import sys
 from pathlib import Path
 
 from waves.audio import AudioCapture
 from waves.config import load as load_config
+from waves.providers.registry import load_builtin_providers, resolve_llm, resolve_transcription
 from waves.server import WavesServer
 from waves.store import Store
 
@@ -40,6 +40,9 @@ def main() -> None:
     log.info("Config loaded (transcription: %s, summarization: %s)",
              cfg.transcription.provider, cfg.summarization.provider)
 
+    # Register all built-in providers
+    load_builtin_providers()
+
     asyncio.run(_run(socket_path, db_path, data_dir, model_dir, cfg, log))
 
 
@@ -61,20 +64,21 @@ async def _run(socket_path, db_path, data_dir, model_dir, cfg, log) -> None:
         audio=audio,
     )
 
-    # Set up transcription provider
-    if cfg.transcription.provider == "whisper-local":
-        from waves.providers.transcription.whisper_local import WhisperLocal
-        server.transcriber = WhisperLocal(
-            model_dir=model_dir,
-            binary=cfg.transcription.whisper.binary,
-            language=cfg.transcription.language,
-        )
-        log.info("Transcription provider: whisper-local")
-    else:
-        log.warning("Transcription provider '%s' not yet implemented", cfg.transcription.provider)
+    # Resolve transcription provider via registry
+    try:
+        server.transcriber = resolve_transcription(cfg.transcription.provider, cfg)
+        log.info("Transcription: %s", server.transcriber.name)
+    except Exception as e:
+        log.warning("Could not load transcription provider: %s", e)
+
+    # Resolve LLM provider via registry
+    try:
+        server.llm = resolve_llm(cfg.summarization.provider, cfg)
+        log.info("LLM: %s", server.llm.name)
+    except Exception as e:
+        log.warning("Could not load LLM provider: %s", e)
 
     # Handle shutdown
-    loop = asyncio.get_event_loop()
     stop = asyncio.Event()
 
     def _shutdown(signum, frame):

@@ -14,6 +14,8 @@ from pathlib import Path
 
 from waves.providers.base import Segment
 
+from waves.providers.registry import register_transcription
+
 log = logging.getLogger(__name__)
 
 
@@ -185,3 +187,27 @@ def _parse_whisper_time(s: str) -> int:
     ms_str = match.group(4) or "0"
     ms = int(ms_str.ljust(3, "0")[:3])
     return ((h * 3600 + m * 60 + sec) * 1000) + ms
+
+
+# -- Self-registration --
+
+def _factory(model: str | None, config) -> WhisperLocal:
+    from pathlib import Path
+    home = Path.home()
+    model_dir = str(home / "Library" / "Application Support" / "Waves" / "models")
+    provider = WhisperLocal(
+        model_dir=model_dir,
+        binary=getattr(getattr(config, "transcription", None), "whisper", None)
+               and config.transcription.whisper.binary or "whisper-cli",
+        language=getattr(getattr(config, "transcription", None), "language", "") or "",
+    )
+    if model:
+        import asyncio
+        try:
+            asyncio.get_event_loop().run_until_complete(provider.set_model(model))
+        except Exception:
+            log.warning("Could not set model %r, using default", model)
+    return provider
+
+
+register_transcription("whisper-local", _factory)
