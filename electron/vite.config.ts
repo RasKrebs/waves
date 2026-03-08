@@ -1,16 +1,22 @@
-import { defineConfig } from 'vite'
-import react from '@vitejs/plugin-react'
-import path from 'path'
+import { defineConfig } from "vite"
+import react from "@vitejs/plugin-react"
+import tailwindcss from "@tailwindcss/vite"
+import { TanStackRouterVite } from "@tanstack/router-plugin/vite"
+import path from "path"
 
 export default defineConfig({
-  plugins: [react()],
-  root: path.join(__dirname, 'renderer'),
-  build: {
-    outDir: path.join(__dirname, 'dist'),
-    emptyOutDir: true,
+  plugins: [
+    TanStackRouterVite({ target: "react", autoCodeSplitting: true }),
+    react(),
+    tailwindcss(),
+  ],
+  resolve: {
+    alias: {
+      "@": path.resolve(__dirname, "."),
+    },
   },
-  server: {
-    port: 5173,
-    strictPort: true,
+  base: "./",
+  build: {
+    outDir: "dist",
   },
 })

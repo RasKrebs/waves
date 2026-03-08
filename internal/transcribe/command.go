@@ -108,7 +108,9 @@ func (c *Command) StreamTranscribe(ctx context.Context, src io.Reader, segmentSe
 			continue
 		}
 
-		segs, err := c.TranscribeFile(ctx, wavPath, nil)
+		txCtx, txCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		segs, err := c.TranscribeFile(txCtx, wavPath, nil)
+		txCancel()
 		if err != nil {
 			continue
 		}
@@ -160,7 +162,7 @@ func (c *Command) parseOutput(stdout, wavPath string) ([]Segment, error) {
 func (c *Command) parseJSON(stdout, wavPath string) ([]Segment, error) {
 	// If stdout is empty, try reading a sidecar .json file (whisper.cpp convention)
 	if stdout == "" {
-		jsonPath := strings.TrimSuffix(wavPath, ".wav") + ".json"
+		jsonPath := wavPath + ".json"
 		data, err := os.ReadFile(jsonPath)
 		if err != nil {
 			return nil, fmt.Errorf("no stdout and no sidecar json at %s", jsonPath)

@@ -78,13 +78,14 @@ func statusCmd() *cobra.Command {
 }
 
 func recordCmd() *cobra.Command {
-	var title string
+	var title, device string
+	var pid int
 	cmd := &cobra.Command{
 		Use:   "record",
 		Short: "Start recording a meeting",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var reply types.StartReply
-			if err := rpcCall("StartRecording", types.StartArgs{Title: title}, &reply); err != nil {
+			if err := rpcCall("StartRecording", types.StartArgs{Title: title, Device: device, PID: pid}, &reply); err != nil {
 				return err
 			}
 			fmt.Printf("Recording started: session ID %s\n", reply.SessionID)
@@ -93,6 +94,8 @@ func recordCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVarP(&title, "title", "t", "", "Meeting title (auto-generated if empty)")
+	cmd.Flags().StringVarP(&device, "device", "d", "", "Audio input device UID (default: system default mic)")
+	cmd.Flags().IntVarP(&pid, "pid", "p", 0, "Process ID to capture audio from (macOS 14.2+, e.g. Zoom/Teams)")
 	return cmd
 }
 

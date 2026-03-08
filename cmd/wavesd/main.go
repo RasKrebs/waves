@@ -92,10 +92,11 @@ func main() {
 
 	// Initialize audio capture and model downloader
 	capturer := audio.NewCapturer()
+	audioCap := audio.NewSubprocessCapture("") // finds waves-audio on PATH
 	downloader := models.NewDownloader(modelDir, cfg.Summarization.Claude.APIKey) // reuse token if available
 
 	// Start JSON-RPC server
-	srv := server.New(*socketPath, *dataDir, db, tr, capturer, cfg, downloader, sum)
+	srv := server.New(*socketPath, *dataDir, db, tr, capturer, audioCap, cfg, downloader, sum)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

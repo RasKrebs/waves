@@ -250,11 +250,21 @@ func (c *Capturer) Read(p []byte) (int, error) {
 
 	buf := make([]byte, len(p))
 	cBuf := (*C.uchar)(unsafe.Pointer(&buf[0]))
-	n := int(C.read_audio(cBuf, C.int(len(p))))
-	if n == 0 {
+
+	// Block until data is available so io.ReadFull works correctly.
+	for {
+		n := int(C.read_audio(cBuf, C.int(len(p))))
+		if n > 0 {
+			copy(p, buf[:n])
+			return n, nil
+		}
+		// Check if capture was stopped while waiting.
+		c.mu.Lock()
+		stopped := !c.capturing
+		c.mu.Unlock()
+		if stopped {
+			return 0, io.EOF
+		}
 		time.Sleep(20 * time.Millisecond)
-		return 0, nil
 	}
-	copy(p, buf[:n])
-	return n, nil
 }

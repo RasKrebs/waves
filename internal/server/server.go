@@ -3,11 +3,15 @@ package server
 import (
 	"context"
 	"fmt"
+	"io"
+	"log"
 	"net"
 	"net/rpc"
 	"net/rpc/jsonrpc"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -27,6 +31,7 @@ type Server struct {
 	db          *store.DB
 	transcriber transcribe.StreamProvider
 	capturer    *audio.Capturer
+	audioCap    *audio.SubprocessCapture
 	cfg         *config.Config
 	downloader  *models.Downloader
 	summarizer  summarize.Provider
@@ -42,13 +47,14 @@ type activeSession struct {
 	segCh   chan transcribe.Segment
 }
 
-func New(socketPath, dataDir string, db *store.DB, tr transcribe.StreamProvider, cap *audio.Capturer, cfg *config.Config, dl *models.Downloader, sum summarize.Provider) *Server {
+func New(socketPath, dataDir string, db *store.DB, tr transcribe.StreamProvider, cap *audio.Capturer, audioCap *audio.SubprocessCapture, cfg *config.Config, dl *models.Downloader, sum summarize.Provider) *Server {
 	return &Server{
 		socketPath:  socketPath,
 		dataDir:     dataDir,
 		db:          db,
 		transcriber: tr,
 		capturer:    cap,
+		audioCap:    audioCap,
 		cfg:         cfg,
 		downloader:  dl,
 		summarizer:  sum,
@@ -144,13 +150,15 @@ func (h *Handler) StartRecording(args types.StartArgs, reply *types.StartReply) 
 		return fmt.Errorf("db error: %w", err)
 	}
 
-	deviceUID := h.srv.capturer.FindBlackHole()
-	if deviceUID == "" {
-		return fmt.Errorf("BlackHole not found - install from https://existential.audio/blackhole and set up Multi-Output Device")
-	}
-
-	if err := h.srv.capturer.Start(deviceUID); err != nil {
-		return fmt.Errorf("audio capture error: %w", err)
+	// Use waves-audio subprocess for capture (supports both mic and process tap)
+	if args.PID > 0 {
+		if err := h.srv.audioCap.StartTap(args.PID); err != nil {
+			return fmt.Errorf("process tap error: %w", err)
+		}
+	} else {
+		if err := h.srv.audioCap.StartMic(args.Device); err != nil {
+			return fmt.Errorf("audio capture error: %w", err)
+		}
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -181,7 +189,52 @@ func (h *Handler) StartRecording(args types.StartArgs, reply *types.StartReply) 
 
 func (s *Server) streamTranscribe(ctx context.Context, sessionID string, out chan<- transcribe.Segment) {
 	defer close(out)
-	s.transcriber.StreamTranscribe(ctx, s.capturer, 30, out)
+	log.Printf("[transcribe] starting stream transcription for session %s", sessionID)
+
+	// Save raw audio to WAV file while streaming to transcriber
+	audioPath := filepath.Join(s.dataDir, "recordings", sessionID+".wav")
+	audioFile, err := os.Create(audioPath)
+	if err != nil {
+		log.Printf("[transcribe] failed to create audio file: %v", err)
+		// Fall back to transcription without saving
+		if err := s.transcriber.StreamTranscribe(ctx, s.audioCap, 10, out); err != nil {
+			log.Printf("[transcribe] error for session %s: %v", sessionID, err)
+		}
+		return
+	}
+
+	// Write placeholder WAV header (44 bytes), will update data size at end
+	header := make([]byte, 44)
+	copy(header[0:], "RIFF")
+	copy(header[8:], "WAVE")
+	copy(header[12:], "fmt ")
+	putU32LE(header, 16, 16)       // fmt chunk size
+	putU16LE(header, 20, 1)        // PCM format
+	putU16LE(header, 22, 1)        // mono
+	putU32LE(header, 24, 16000)    // sample rate
+	putU32LE(header, 28, 32000)    // byte rate (16000 * 1 * 2)
+	putU16LE(header, 32, 2)        // block align
+	putU16LE(header, 34, 16)       // bits per sample
+	copy(header[36:], "data")
+	audioFile.Write(header)
+
+	// TeeReader: every byte read by transcriber also gets written to the file
+	tee := io.TeeReader(s.audioCap, audioFile)
+
+	if err := s.transcriber.StreamTranscribe(ctx, tee, 10, out); err != nil {
+		log.Printf("[transcribe] error for session %s: %v", sessionID, err)
+	}
+
+	// Finalize WAV header with actual data size
+	pos, _ := audioFile.Seek(0, io.SeekCurrent)
+	dataSize := uint32(pos - 44)
+	putU32LE(header, 4, 36+dataSize)
+	putU32LE(header, 40, dataSize)
+	audioFile.Seek(0, io.SeekStart)
+	audioFile.Write(header)
+	audioFile.Close()
+
+	log.Printf("[transcribe] saved audio to %s (%d bytes)", audioPath, dataSize)
 }
 
 // --- StopRecording ---
@@ -196,7 +249,7 @@ func (h *Handler) StopRecording(_ types.StopArgs, reply *types.StopReply) error 
 
 	as := h.srv.activeSession
 	as.cancel()
-	h.srv.capturer.Stop()
+	h.srv.audioCap.Stop()
 
 	now := time.Now()
 	dur := now.Sub(as.session.StartedAt).Round(time.Second)
@@ -439,8 +492,25 @@ func (h *Handler) TranscribeFile(args types.TranscribeFileArgs, reply *types.Tra
 
 	// Transcribe in background
 	go func() {
-		segments, err := h.srv.transcriber.TranscribeFile(context.Background(), destPath, nil)
+		// Convert unsupported formats to WAV (whisper-cli supports wav, mp3, ogg, flac)
+		transcribePath := destPath
+		ext := strings.ToLower(filepath.Ext(destPath))
+		if ext != ".wav" && ext != ".mp3" && ext != ".ogg" && ext != ".flac" {
+			wavPath := strings.TrimSuffix(destPath, filepath.Ext(destPath)) + ".wav"
+			log.Printf("[transcribe] converting %s to WAV", ext)
+			cmd := exec.Command("ffmpeg", "-i", destPath, "-ar", "16000", "-ac", "1", "-y", wavPath)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				log.Printf("[transcribe] ffmpeg conversion failed: %v\n%s", err, out)
+				sess.Status = "failed"
+				h.srv.db.UpdateSession(sess)
+				return
+			}
+			transcribePath = wavPath
+		}
+
+		segments, err := h.srv.transcriber.TranscribeFile(context.Background(), transcribePath, nil)
 		if err != nil {
+			log.Printf("[transcribe] file transcription failed for %s: %v", destPath, err)
 			sess.Status = "failed"
 			h.srv.db.UpdateSession(sess)
 			return
@@ -463,6 +533,20 @@ func (h *Handler) TranscribeFile(args types.TranscribeFileArgs, reply *types.Tra
 
 	reply.SessionID = sessionID
 	return nil
+}
+
+// --- WAV helpers ---
+
+func putU32LE(b []byte, off int, v uint32) {
+	b[off] = byte(v)
+	b[off+1] = byte(v >> 8)
+	b[off+2] = byte(v >> 16)
+	b[off+3] = byte(v >> 24)
+}
+
+func putU16LE(b []byte, off int, v uint16) {
+	b[off] = byte(v)
+	b[off+1] = byte(v >> 8)
 }
 
 // --- GetConfig ---

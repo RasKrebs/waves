@@ -14,7 +14,11 @@ type StatusReply struct {
 }
 
 // Recording
-type StartArgs struct{ Title string }
+type StartArgs struct {
+	Title  string
+	Device string // device UID; empty = system default input
+	PID    int    // process ID for tap mode (macOS 14.2+); 0 = use mic
+}
 type StartReply struct{ SessionID string }
 
 type StopArgs struct{}

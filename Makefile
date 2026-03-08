@@ -7,7 +7,7 @@ INSTALL_DIR   := /usr/local/bin
 
 all: build
 
-build: daemon cli
+build: daemon cli waves-audio
 
 daemon:
 	@mkdir -p $(BUILD_DIR)
@@ -19,16 +19,32 @@ cli:
 	go build -o $(BUILD_DIR)/$(BINARY_CLI) ./cmd/waves
 	@echo "Built $(BUILD_DIR)/$(BINARY_CLI)"
 
+waves-audio:
+	@mkdir -p $(BUILD_DIR)
+	cd tools/waves-audio && swift build -c release
+	cp tools/waves-audio/.build/release/waves-audio $(BUILD_DIR)/waves-audio
+	codesign -s - -f --entitlements tools/waves-audio/waves-audio.entitlements $(BUILD_DIR)/waves-audio
+	@echo "Built $(BUILD_DIR)/waves-audio"
+
 install: build
 	sudo cp $(BUILD_DIR)/$(BINARY_DAEMON) $(INSTALL_DIR)/
 	sudo cp $(BUILD_DIR)/$(BINARY_CLI) $(INSTALL_DIR)/
+	sudo cp $(BUILD_DIR)/waves-audio $(INSTALL_DIR)/
 	@echo "Installed to $(INSTALL_DIR)"
 
 electron-install:
 	cd electron && npm install
 
-electron-dev: daemon
+backend-install:
+	cd backend && uv sync
+
+backend-run:
+	cd backend && uv run python -m waves -v
+
+dev: waves-audio backend-install
 	cd electron && npm run dev
+
+electron-dev: dev
 
 electron-build: build
 	cd electron && npm run dist

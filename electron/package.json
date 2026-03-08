@@ -1,50 +1,64 @@
 {
   "name": "waves",
   "version": "0.1.0",
-  "description": "Local meeting transcription and summarization",
-  "main": "dist-electron/main.js",
+  "private": true,
+  "type": "module",
+  "main": "main/dist/index.cjs",
   "scripts": {
-    "dev": "concurrently \"vite\" \"wait-on tcp:5173 && cross-env NODE_ENV=development electron .\"",
-    "build": "vite build && tsc -p tsconfig.electron.json",
+    "dev": "tsc -p tsconfig.main.json && concurrently -n vite,electron \"vite\" \"wait-on http://localhost:5173 && electron .\"",
+    "build": "tsc -p tsconfig.main.json && vite build",
+    "start": "electron .",
     "dist": "npm run build && electron-builder",
-    "lint": "eslint src --ext ts,tsx"
-  },
-  "dependencies": {
-    "active-win": "^7.0.0",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1"
-  },
-  "devDependencies": {
-    "@types/node": "^20.0.0",
-    "@types/react": "^18.3.1",
-    "@types/react-dom": "^18.3.1",
-    "@vitejs/plugin-react": "^4.3.1",
-    "autoprefixer": "^10.4.19",
-    "concurrently": "^8.2.2",
-    "cross-env": "^7.0.3",
-    "electron": "^31.0.0",
-    "electron-builder": "^24.13.3",
-    "postcss": "^8.4.39",
-    "tailwindcss": "^3.4.6",
-    "typescript": "^5.5.3",
-    "vite": "^5.3.4",
-    "wait-on": "^7.2.0"
+    "lint": "tsc --noEmit"
   },
   "build": {
     "appId": "com.waves.app",
     "productName": "Waves",
     "mac": {
-      "category": "public.app-category.productivity",
-      "target": ["dmg", "zip"],
-      "icon": "assets/icon.icns",
-      "extendInfo": {
-        "NSMicrophoneUsageDescription": "Waves captures system audio via BlackHole for transcription.",
-        "NSAccessibilityUsageDescription": "Waves uses accessibility to detect active meetings."
-      }
+      "target": "dmg",
+      "category": "public.app-category.productivity"
     },
-    "extraResources": [
-      { "from": "../build/wavesd", "to": "wavesd" }
+    "files": [
+      "main/dist/**/*",
+      "dist/**/*",
+      "public/**/*"
     ],
-    "files": ["dist/**/*", "dist-electron/**/*", "assets/**/*"]
+    "extraResources": [
+      {
+        "from": "../build/wavesd",
+        "to": "wavesd"
+      },
+      {
+        "from": "../build/waves-audio",
+        "to": "waves-audio"
+      }
+    ]
+  },
+  "dependencies": {
+    "@tanstack/react-router": "^1.166.2",
+    "radix-ui": "^1.4.3",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.2.1",
+    "@tanstack/router-devtools": "^1.166.2",
+    "@tanstack/router-plugin": "^1.166.2",
+    "@types/node": "^25.3.5",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.1.4",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "concurrently": "^9.2.1",
+    "electron": "^40.8.0",
+    "electron-builder": "^26.8.1",
+    "lucide-react": "^0.577.0",
+    "postcss": "^8.5.8",
+    "tailwind-merge": "^3.5.0",
+    "tailwindcss": "^4.2.1",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.1",
+    "wait-on": "^9.0.4"
   }
 }

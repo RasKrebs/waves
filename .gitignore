@@ -1,11 +1,45 @@
+# Build output
 build/
 dist/
 dist-electron/
-node_modules/
-*.db
-*.sock
-*.wav
-*.log
-.DS_Store
 electron/dist/
 electron/dist-electron/
+electron/.next/
+
+# Dependencies
+node_modules/
+
+# Swift build artifacts
+tools/waves-audio/.build/
+tools/waves-audio/.swiftpm/
+
+# Runtime data
+*.db
+*.sock
+*.log
+
+# Audio files
+*.wav
+*.mp3
+*.m4a
+*.ogg
+*.flac
+*.aac
+
+# Test files
+test.*
+
+# OS
+.DS_Store
+
+# Claude Code worktrees
+.claude/worktrees/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Binaries (root level, built outside build/)
+/waves
+/wavesd

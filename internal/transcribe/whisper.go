@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -171,6 +172,7 @@ func (w *WhisperLocal) StreamTranscribe(ctx context.Context, src io.Reader, segm
 
 		n, err := io.ReadFull(src, buf)
 		if err != nil && err != io.ErrUnexpectedEOF {
+			log.Printf("[transcribe] stream read ended: %v (got %d bytes)", err, n)
 			return nil
 		}
 		if n == 0 {
@@ -182,14 +184,23 @@ func (w *WhisperLocal) StreamTranscribe(ctx context.Context, src io.Reader, segm
 		chunkIdx++
 		offset := time.Duration(chunkIdx-1) * time.Duration(segmentSec) * time.Second
 
+		log.Printf("[transcribe] chunk %d: %d bytes, transcribing...", chunkIdx-1, n)
+
 		if err := WritePCM16ToWAV(wavPath, buf[:n], 16000, 1); err != nil {
+			log.Printf("[transcribe] WAV write error: %v", err)
 			continue
 		}
 
-		segs, err := w.TranscribeFile(ctx, wavPath, nil)
+		// Use a separate context with timeout so that cancelling the stream
+		// context (on stop-recording) doesn't kill the final chunk's transcription.
+		txCtx, txCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		segs, err := w.TranscribeFile(txCtx, wavPath, nil)
+		txCancel()
 		if err != nil {
+			log.Printf("[transcribe] chunk %d transcribe error: %v", chunkIdx-1, err)
 			continue
 		}
+		log.Printf("[transcribe] chunk %d: got %d segments", chunkIdx-1, len(segs))
 		for _, seg := range segs {
 			seg.Start += offset
 			seg.End += offset
@@ -240,7 +251,7 @@ func parseWhisperTime(s string) time.Duration {
 }
 
 func parseOutputFile(wavPath string) ([]Segment, error) {
-	jsonPath := strings.TrimSuffix(wavPath, filepath.Ext(wavPath)) + ".json"
+	jsonPath := wavPath + ".json"
 	f, err := os.Open(jsonPath)
 	if err != nil {
 		return nil, fmt.Errorf("whisper output not found at %s", jsonPath)
