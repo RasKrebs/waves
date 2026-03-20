@@ -11,6 +11,7 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as UploadRouteImport } from './routes/upload'
 import { Route as RecordRouteImport } from './routes/record'
+import { Route as ProjectsRouteImport } from './routes/projects'
 import { Route as ModelsRouteImport } from './routes/models'
 import { Route as HistoryRouteImport } from './routes/history'
 import { Route as IndexRouteImport } from './routes/index'
@@ -23,6 +24,11 @@ const UploadRoute = UploadRouteImport.update({
 const RecordRoute = RecordRouteImport.update({
   id: '/record',
   path: '/record',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ProjectsRoute = ProjectsRouteImport.update({
+  id: '/projects',
+  path: '/projects',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ModelsRoute = ModelsRouteImport.update({
@@ -45,6 +51,7 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/history': typeof HistoryRoute
   '/models': typeof ModelsRoute
+  '/projects': typeof ProjectsRoute
   '/record': typeof RecordRoute
   '/upload': typeof UploadRoute
 }
@@ -52,6 +59,7 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/history': typeof HistoryRoute
   '/models': typeof ModelsRoute
+  '/projects': typeof ProjectsRoute
   '/record': typeof RecordRoute
   '/upload': typeof UploadRoute
 }
@@ -60,21 +68,30 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/history': typeof HistoryRoute
   '/models': typeof ModelsRoute
+  '/projects': typeof ProjectsRoute
   '/record': typeof RecordRoute
   '/upload': typeof UploadRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/history' | '/models' | '/record' | '/upload'
+  fullPaths: '/' | '/history' | '/models' | '/projects' | '/record' | '/upload'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/history' | '/models' | '/record' | '/upload'
-  id: '__root__' | '/' | '/history' | '/models' | '/record' | '/upload'
+  to: '/' | '/history' | '/models' | '/projects' | '/record' | '/upload'
+  id:
+    | '__root__'
+    | '/'
+    | '/history'
+    | '/models'
+    | '/projects'
+    | '/record'
+    | '/upload'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   HistoryRoute: typeof HistoryRoute
   ModelsRoute: typeof ModelsRoute
+  ProjectsRoute: typeof ProjectsRoute
   RecordRoute: typeof RecordRoute
   UploadRoute: typeof UploadRoute
 }
@@ -93,6 +110,13 @@ declare module '@tanstack/react-router' {
       path: '/record'
       fullPath: '/record'
       preLoaderRoute: typeof RecordRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/projects': {
+      id: '/projects'
+      path: '/projects'
+      fullPath: '/projects'
+      preLoaderRoute: typeof ProjectsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/models': {
@@ -123,6 +147,7 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   HistoryRoute: HistoryRoute,
   ModelsRoute: ModelsRoute,
+  ProjectsRoute: ProjectsRoute,
   RecordRoute: RecordRoute,
   UploadRoute: UploadRoute,
 }

@@ -22,6 +22,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { useTheme } from "./theme-provider"
 import type { ModelRow } from "../src/types/waves"
 import { ModelsPage } from "./settings/models"
+import { TemplatesPage } from "./settings/templates"
 
 interface SettingsDialogProps {
   open: boolean
@@ -245,6 +246,7 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
             <TabsTrigger value="general">General</TabsTrigger>
             <TabsTrigger value="transcription">Transcription</TabsTrigger>
             <TabsTrigger value="summarization">Summarization</TabsTrigger>
+            <TabsTrigger value="templates">Templates</TabsTrigger>
             <TabsTrigger value="models">Models</TabsTrigger>
           </TabsList>
 
@@ -418,16 +420,40 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
             <Separator />
 
             {summarizationProvider === "claude" && (
-              <SettingRow label="API key" description="Required for Claude summarization">
-                <Input
-                  type="password"
-                  placeholder="sk-ant-..."
-                  value={claudeKey}
-                  onChange={(e) => setClaudeKey(e.target.value)}
-                  onBlur={() => handleApiKeySave("summarization", "claude", claudeKey)}
-                  className="w-[160px] h-8 text-xs"
-                />
-              </SettingRow>
+              <>
+                <SettingRow label="API key" description="Required for Claude summarization">
+                  <Input
+                    type="password"
+                    placeholder="sk-ant-..."
+                    value={claudeKey}
+                    onChange={(e) => setClaudeKey(e.target.value)}
+                    onBlur={() => handleApiKeySave("summarization", "claude", claudeKey)}
+                    className="w-[160px] h-8 text-xs"
+                  />
+                </SettingRow>
+                <Separator />
+                <SettingRow label="Enhancement model" description="Fast model for fixing transcription errors">
+                  <Input
+                    defaultValue="claude-haiku-4-5-20251001"
+                    className="w-[200px] h-8 text-xs"
+                    onBlur={(e) => {
+                      const model = e.target.value.trim()
+                      if (model) saveConfig({ summarization: { enhancement_model: model } })
+                    }}
+                  />
+                </SettingRow>
+                <Separator />
+                <SettingRow label="Summarization model" description="Quality model for generating meeting notes">
+                  <Input
+                    defaultValue="claude-sonnet-4-20250514"
+                    className="w-[200px] h-8 text-xs"
+                    onBlur={(e) => {
+                      const model = e.target.value.trim()
+                      if (model) saveConfig({ summarization: { summarization_model: model } })
+                    }}
+                  />
+                </SettingRow>
+              </>
             )}
 
             {summarizationProvider === "openai" && (
@@ -469,6 +495,9 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
                 </SelectContent>
               </Select>
             </SettingRow>
+          </TabsContent>
+          <TabsContent value="templates" className="overflow-y-auto mt-4 space-y-1">
+            <TemplatesPage />
           </TabsContent>
           <TabsContent value="models" className="overflow-y-auto mt-4 space-y-1">
             <ModelsPage />

@@ -61,6 +61,8 @@ class OllamaConfig:
 @dataclass
 class SummarizationConfig:
     provider: str = "anthropic"
+    enhancement_model: str = "claude-haiku-4-5-20251001"
+    summarization_model: str = "claude-sonnet-4-20250514"
     claude: ClaudeConfig = field(default_factory=ClaudeConfig)
     openai: APIConfig = field(default_factory=APIConfig)
     ollama: OllamaConfig = field(default_factory=OllamaConfig)
@@ -77,6 +79,68 @@ class WorkflowStep:
 @dataclass
 class Workflow:
     steps: list[WorkflowStep] = field(default_factory=list)
+
+
+@dataclass
+class NoteTemplate:
+    name: str = ""
+    description: str = ""
+    template: str = ""
+
+
+DEFAULT_NOTE_TEMPLATES: dict[str, NoteTemplate] = {
+    "general-meeting": NoteTemplate(
+        name="General Meeting",
+        description="Standard meeting notes with key points, decisions, and action items",
+        template="""\
+# {{.Title}}
+
+**Date:** {{.Date}}
+**Duration:** {{.Duration}}
+
+## Attendees
+<!-- List participants mentioned in the transcript -->
+
+## Agenda / Topics Discussed
+<!-- Main topics covered in the meeting -->
+
+## Key Points
+<!-- The most important information shared -->
+
+## Decisions Made
+<!-- Any decisions that were reached -->
+
+## Action Items
+- [ ] <!-- Task — Owner — Deadline if mentioned -->
+
+## Notes
+<!-- Any additional context or details worth capturing -->
+""",
+    ),
+    "standup": NoteTemplate(
+        name="Standup",
+        description="Daily standup format — what was done, what's planned, blockers",
+        template="""\
+# Standup — {{.Date}}
+
+**Duration:** {{.Duration}}
+
+## Team Updates
+<!-- For each participant, summarize their update -->
+
+### [Participant Name]
+**Yesterday:** <!-- What they completed -->
+**Today:** <!-- What they plan to work on -->
+**Blockers:** <!-- Any impediments -->
+
+## Discussion Points
+<!-- Any topics that came up beyond standard updates -->
+
+## Action Items
+- [ ] <!-- Task — Owner -->
+""",
+    ),
+}
 
 
 DEFAULT_WORKFLOWS: dict[str, Workflow] = {
@@ -112,6 +176,7 @@ class Config:
     transcription: TranscriptionConfig = field(default_factory=TranscriptionConfig)
     summarization: SummarizationConfig = field(default_factory=SummarizationConfig)
     workflows: dict[str, Workflow] = field(default_factory=lambda: dict(DEFAULT_WORKFLOWS))
+    note_templates: dict[str, NoteTemplate] = field(default_factory=lambda: dict(DEFAULT_NOTE_TEMPLATES))
 
 
 def default_path() -> Path:
@@ -223,5 +288,13 @@ def load(path: Path | None = None) -> Config:
             for s in wf_raw.get("steps", []):
                 steps.append(WorkflowStep(name=s.get("name", ""), prompt=s.get("prompt", "")))
             cfg.workflows[name] = Workflow(steps=steps)
+
+    if "note_templates" in raw and isinstance(raw["note_templates"], dict):
+        for name, tmpl_raw in raw["note_templates"].items():
+            cfg.note_templates[name] = NoteTemplate(
+                name=tmpl_raw.get("name", name),
+                description=tmpl_raw.get("description", ""),
+                template=tmpl_raw.get("template", ""),
+            )
 
     return cfg

@@ -1,195 +1,117 @@
-import { createFileRoute } from "@tanstack/react-router"
+import { createFileRoute, useNavigate } from "@tanstack/react-router"
 import { useState, useEffect, useRef, useCallback } from "react"
-import { Square } from "lucide-react"
+import { Mic, MicOff, RefreshCw, Monitor, Pencil, SlidersHorizontal } from "lucide-react"
+import type { AudioProcess, Device } from "../types/waves"
+import { getProcessDisplayName } from "../lib/process-names"
 
 export const Route = createFileRoute("/record")({
   component: RecordPage,
 })
 
-type RecordingState = "idle" | "recording" | "paused"
+type RecordingState = "idle" | "recording"
 
 function formatTime(seconds: number): string {
   const h = Math.floor(seconds / 3600)
   const m = Math.floor((seconds % 3600) / 60)
   const s = Math.floor(seconds % 60)
-  const cs = Math.floor((seconds * 100) % 100)
-  if (h > 0) {
-    return `${h.toString().padStart(2, "0")}:${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`
-  }
-  return `${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")},${cs.toString().padStart(2, "0")}`
+  if (h > 0) return `${h}:${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`
+  return `${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`
 }
 
-const RING_COUNT = 6
-const ACCENT = [96, 165, 250] // blue-400
-
-function CoreCanvas({
-  active,
-  hover,
-}: {
-  active: boolean
-  hover: boolean
-}) {
-  const canvasRef = useRef<HTMLCanvasElement>(null)
+/** Minimal waveform dots — Notion-style recording indicator */
+function RecordingDots({ active }: { active: boolean }) {
+  const [dots, setDots] = useState<number[]>(Array.from({ length: 40 }, () => 0.2))
   const animRef = useRef<number>(0)
-  const levelRef = useRef(0)
-  const ringsRef = useRef<number[]>(Array(RING_COUNT).fill(0))
-  const phaseRef = useRef(0)
-
-  const draw = useCallback(() => {
-    const canvas = canvasRef.current
-    if (!canvas) return
-    const ctx = canvas.getContext("2d")
-    if (!ctx) return
-
-    const dpr = window.devicePixelRatio || 1
-    const rect = canvas.getBoundingClientRect()
-    canvas.width = rect.width * dpr
-    canvas.height = rect.height * dpr
-    ctx.scale(dpr, dpr)
-
-    const w = rect.width
-    const h = rect.height
-    const cx = w / 2
-    const cy = h / 2
-    const maxR = Math.min(w, h) / 2
-
-    ctx.clearRect(0, 0, w, h)
-
-    // Simulate audio level with smoothed noise
-    const target = active ? 0.3 + Math.random() * 0.7 : 0
-    levelRef.current += (target - levelRef.current) * 0.12
-    const level = levelRef.current
-
-    phaseRef.current += 0.02
-
-    // Update ring amplitudes (each ring reacts with slight delay)
-    const rings = ringsRef.current
-    for (let i = 0; i < RING_COUNT; i++) {
-      const delayed = level * (1 - i * 0.1)
-      rings[i] += (Math.max(0, delayed) - rings[i]) * (0.15 - i * 0.015)
-    }
-
-    // Draw rings from outermost to innermost
-    for (let i = RING_COUNT - 1; i >= 0; i--) {
-      const t = i / RING_COUNT
-      const baseR = maxR * 0.25 + maxR * 0.55 * t
-      const pulse = rings[i] * maxR * 0.12
-      const wobble =
-        Math.sin(phaseRef.current * (1.5 + i * 0.3) + i * 1.2) *
-        rings[i] *
-        maxR *
-        0.04
-      const r = baseR + pulse + wobble
-
-      const alpha = active
-        ? 0.08 + rings[i] * 0.25
-        : hover
-          ? 0.06
-          : 0.03
-
-      ctx.beginPath()
-      ctx.arc(cx, cy, Math.max(0, r), 0, Math.PI * 2)
-      ctx.strokeStyle = `rgba(${ACCENT[0]}, ${ACCENT[1]}, ${ACCENT[2]}, ${alpha})`
-      ctx.lineWidth = 1.5 + rings[i] * 2
-      ctx.stroke()
-    }
-
-    // Inner glow
-    const glowR = maxR * 0.22 + level * maxR * 0.06
-    const glowAlpha = active ? 0.12 + level * 0.2 : hover ? 0.06 : 0.03
-    const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, glowR * 2.5)
-    grad.addColorStop(
-      0,
-      `rgba(${ACCENT[0]}, ${ACCENT[1]}, ${ACCENT[2]}, ${glowAlpha})`,
-    )
-    grad.addColorStop(1, `rgba(${ACCENT[0]}, ${ACCENT[1]}, ${ACCENT[2]}, 0)`)
-    ctx.fillStyle = grad
-    ctx.fillRect(0, 0, w, h)
-
-    // Core circle
-    const coreR = maxR * 0.18 + level * maxR * 0.04
-    const coreAlpha = active ? 0.6 + level * 0.35 : hover ? 0.3 : 0.15
-    const coreGrad = ctx.createRadialGradient(
-      cx,
-      cy,
-      0,
-      cx,
-      cy,
-      coreR,
-    )
-    coreGrad.addColorStop(
-      0,
-      `rgba(${ACCENT[0]}, ${ACCENT[1]}, ${ACCENT[2]}, ${coreAlpha})`,
-    )
-    coreGrad.addColorStop(
-      0.7,
-      `rgba(${ACCENT[0]}, ${ACCENT[1]}, ${ACCENT[2]}, ${coreAlpha * 0.5})`,
-    )
-    coreGrad.addColorStop(
-      1,
-      `rgba(${ACCENT[0]}, ${ACCENT[1]}, ${ACCENT[2]}, 0)`,
-    )
-    ctx.beginPath()
-    ctx.arc(cx, cy, coreR, 0, Math.PI * 2)
-    ctx.fillStyle = coreGrad
-    ctx.fill()
-
-    animRef.current = requestAnimationFrame(draw)
-  }, [active, hover])
 
   useEffect(() => {
-    animRef.current = requestAnimationFrame(draw)
+    const animate = () => {
+      setDots(prev => prev.map((d) => {
+        if (active) {
+          const target = 0.15 + Math.random() * 0.85
+          return d + (target - d) * 0.12
+        }
+        return d + (0.15 - d) * 0.08
+      }))
+      animRef.current = requestAnimationFrame(animate)
+    }
+    animate()
     return () => cancelAnimationFrame(animRef.current)
-  }, [draw])
+  }, [active])
 
   return (
-    <canvas ref={canvasRef} className="absolute inset-0 w-full h-full" />
+    <div className="flex items-center gap-[3px] h-4">
+      {dots.map((d, i) => (
+        <div
+          key={i}
+          className="w-[3px] rounded-full transition-colors duration-300"
+          style={{
+            height: `${Math.max(3, d * 16)}px`,
+            backgroundColor: active
+              ? `rgba(255, 255, 255, ${0.3 + d * 0.5})`
+              : `rgba(255, 255, 255, 0.1)`,
+          }}
+        />
+      ))}
+    </div>
   )
 }
 
+type OutputSource = { type: "all" } | { type: "process"; pid: number; name: string }
+type InputSource = { type: "none" } | { type: "default" } | { type: "device"; uid: string; name: string }
+
 function RecordPage() {
+  const navigate = useNavigate()
   const [state, setState] = useState<RecordingState>("idle")
   const [elapsed, setElapsed] = useState(0)
-  const [sessionId, setSessionId] = useState<string | null>(null)
   const [daemonConnected, setDaemonConnected] = useState(false)
-  const [hover, setHover] = useState(false)
+  const [outputSource, setOutputSource] = useState<OutputSource>({ type: "all" })
+  const [inputSource, setInputSource] = useState<InputSource>({ type: "default" })
+  const [processes, setProcesses] = useState<AudioProcess[]>([])
+  const [devices, setDevices] = useState<Device[]>([])
+  const [refreshing, setRefreshing] = useState(false)
+  const [starting, setStarting] = useState(false)
+  const [showSources, setShowSources] = useState(false)
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   useEffect(() => {
     window.waves?.getStatus()
       .then((status) => {
         setDaemonConnected(true)
-        if (status.ActiveSession) {
-          setState("recording")
-          setSessionId(status.ActiveSession)
-        }
+        if (status.ActiveSession) setState("recording")
       })
       .catch(() => setDaemonConnected(false))
   }, [])
 
+  const refreshSources = useCallback(async () => {
+    setRefreshing(true)
+    try {
+      const [procRes, devRes] = await Promise.all([
+        window.waves.listProcesses(),
+        window.waves.listDevices(),
+      ])
+      setProcesses(procRes.Processes ?? [])
+      setDevices(devRes.Devices ?? [])
+    } catch (err) {
+      console.error("Failed to load sources:", err)
+    } finally {
+      setRefreshing(false)
+    }
+  }, [])
+
+  useEffect(() => { refreshSources() }, [refreshSources])
+
   useEffect(() => {
     if (state === "recording") {
-      timerRef.current = setInterval(() => {
-        setElapsed((e) => e + 0.01)
-      }, 10)
+      timerRef.current = setInterval(() => setElapsed((e) => e + 1), 1000)
     } else {
       if (timerRef.current) clearInterval(timerRef.current)
     }
-    return () => {
-      if (timerRef.current) clearInterval(timerRef.current)
-    }
+    return () => { if (timerRef.current) clearInterval(timerRef.current) }
   }, [state])
 
   useEffect(() => {
-    const onStarted = () => {
-      setState("recording")
-      setElapsed(0)
-    }
-    const onStopped = () => {
-      setState("idle")
-      setElapsed(0)
-      setSessionId(null)
-    }
+    const onStarted = () => { setState("recording"); setElapsed(0) }
+    const onStopped = () => { setState("idle"); setElapsed(0) }
     window.waves?.on("recording:started", onStarted)
     window.waves?.on("recording:stopped", onStopped)
     return () => {
@@ -199,13 +121,21 @@ function RecordPage() {
   }, [])
 
   const handleRecord = async () => {
+    setStarting(true)
     try {
-      const res = await window.waves.startRecording("")
-      setSessionId(res.SessionID)
+      const opts: { PID?: number; Device?: string; IncludeMic?: boolean } = {}
+      if (outputSource.type === "process") opts.PID = outputSource.pid
+      if (inputSource.type !== "none") {
+        opts.IncludeMic = true
+        if (inputSource.type === "device") opts.Device = inputSource.uid
+      }
+      await window.waves.startRecording("", opts)
       setState("recording")
       setElapsed(0)
     } catch (err) {
       console.error("Failed to start recording:", err)
+    } finally {
+      setStarting(false)
     }
   }
 
@@ -214,49 +144,204 @@ function RecordPage() {
       await window.waves.stopRecording()
       setState("idle")
       setElapsed(0)
-      setSessionId(null)
+      navigate({ to: "/history", search: {} })
     } catch (err) {
       console.error("Failed to stop recording:", err)
     }
   }
 
   const isRecording = state === "recording"
+  const activeProcesses = processes.filter(p => p.Active)
+  const inputDevices = devices.filter(d => d.UID !== "UID")
+
+  const todayStr = new Date().toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" })
 
   return (
-    <div className="flex flex-col h-full items-center justify-center gap-6 p-6">
-      {/* Core visualization square */}
-      <button
-        className="relative aspect-square w-full max-w-[320px] rounded-2xl border border-border/50 bg-card/50 overflow-hidden cursor-pointer transition-colors hover:border-border disabled:cursor-not-allowed disabled:opacity-50"
-        onClick={isRecording ? handleStop : handleRecord}
-        onMouseEnter={() => setHover(true)}
-        onMouseLeave={() => setHover(false)}
-        disabled={!daemonConnected}
-      >
-        <CoreCanvas active={isRecording} hover={hover} />
+    <div className="flex flex-col h-full p-2">
+      {/* Notion-style meeting card */}
+      <div className="rounded-lg border border-border/60 bg-card max-w-3xl w-full">
+        {/* Title bar */}
+        <div className="px-5 pt-5 pb-3 border-b border-border/40">
+          <h1 className="text-xl font-bold">
+            Meeting <span className="text-muted-foreground font-normal">@{todayStr}</span>
+          </h1>
+        </div>
 
-        {/* Center icon overlay */}
-        <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+        {/* Controls bar */}
+        <div className="flex items-center gap-3 px-5 py-3 border-b border-border/40">
+          <button
+            className={`flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium transition-colors ${
+              true ? "bg-muted text-foreground" : "text-muted-foreground hover:bg-muted/50"
+            }`}
+          >
+            <Pencil className="size-3" />
+            Notes
+          </button>
+
+          {isRecording && (
+            <div className="flex items-center gap-3 flex-1">
+              <RecordingDots active={isRecording} />
+              <span className="text-xs tabular-nums text-muted-foreground">{formatTime(elapsed)}</span>
+            </div>
+          )}
+
+          <div className="ml-auto flex items-center gap-2">
+            <button
+              onClick={() => !isRecording && setShowSources(!showSources)}
+              disabled={isRecording}
+              className="size-8 flex items-center justify-center rounded-lg text-muted-foreground hover:bg-muted/50 transition-colors disabled:opacity-30"
+              title="Audio settings"
+            >
+              <SlidersHorizontal className="size-4" />
+            </button>
+
+            {isRecording ? (
+              <button
+                onClick={handleStop}
+                className="rounded-lg px-4 py-1.5 text-xs font-medium bg-destructive/15 text-destructive hover:bg-destructive/25 transition-colors"
+              >
+                Stop
+              </button>
+            ) : (
+              <button
+                onClick={handleRecord}
+                disabled={!daemonConnected || starting}
+                className="rounded-lg px-4 py-1.5 text-xs font-medium bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-40"
+              >
+                {starting ? "Starting..." : "Start transcribing"}
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Content area */}
+        <div className="px-5 py-4 min-h-[120px]">
           {isRecording ? (
-            <Square className="size-5 text-blue-400/80 fill-blue-400/80" />
+            <p className="text-sm text-muted-foreground/60">
+              Recording in progress. Notes will be generated when you stop.
+            </p>
           ) : (
-            <div className="size-4 rounded-full bg-blue-400/60" />
+            <p className="text-sm text-muted-foreground/40">
+              Waves will summarize the notes and transcript
+            </p>
           )}
         </div>
-      </button>
 
-      {/* Timer + status */}
-      <div className="flex flex-col items-center gap-2">
-        <div className="tabular-nums text-3xl font-light tracking-wider text-foreground/90">
-          {formatTime(elapsed)}
+        {/* Footer */}
+        <div className="px-5 py-3 border-t border-border/40 flex items-center justify-between">
+          {!daemonConnected && !isRecording ? (
+            <p className="text-[11px] text-destructive/60">Daemon not connected</p>
+          ) : (
+            <p className="text-[11px] text-muted-foreground/30">
+              By starting, you confirm everyone being transcribed has given consent.
+            </p>
+          )}
+          <div className="flex items-center gap-2 text-muted-foreground/30">
+            {inputSource.type === "none"
+              ? <MicOff className="size-3.5" />
+              : <Mic className="size-3.5" />
+            }
+            <Monitor className="size-3.5" />
+          </div>
         </div>
-        <p className="text-xs text-muted-foreground">
-          {!daemonConnected
-            ? "Daemon not connected"
-            : isRecording
-              ? "Recording..."
-              : "Ready to record"}
-        </p>
       </div>
+
+      {/* Source selector — shown when clicking settings */}
+      {showSources && !isRecording && (
+        <div className="rounded-lg border border-border/60 bg-card max-w-3xl w-full mt-3 animate-in slide-in-from-top-2 fade-in-0 duration-200">
+          <div className="p-4 space-y-4">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-medium text-muted-foreground">Audio Sources</span>
+              <button
+                onClick={refreshSources}
+                disabled={refreshing}
+                className="text-[11px] text-muted-foreground/50 hover:text-muted-foreground flex items-center gap-1 transition-colors"
+              >
+                <RefreshCw className={`size-2.5 ${refreshing ? "animate-spin" : ""}`} />
+                Refresh
+              </button>
+            </div>
+
+            {/* Output */}
+            <div className="space-y-1">
+              <span className="text-[10px] font-medium text-muted-foreground/50 uppercase tracking-wider flex items-center gap-1 px-1">
+                <Monitor className="size-2.5" /> System Audio
+              </span>
+              <SourcePill
+                selected={outputSource.type === "all"}
+                onClick={() => setOutputSource({ type: "all" })}
+                label="All System Audio"
+              />
+              {activeProcesses.map((p) => (
+                <SourcePill
+                  key={p.PID}
+                  selected={outputSource.type === "process" && outputSource.pid === p.PID}
+                  onClick={() => setOutputSource({ type: "process", pid: p.PID, name: getProcessDisplayName(p.Name) })}
+                  label={getProcessDisplayName(p.Name)}
+                  meta={`PID ${p.PID}`}
+                />
+              ))}
+              {activeProcesses.length === 0 && (
+                <p className="text-[10px] text-muted-foreground/30 px-3 py-1">No active audio sources</p>
+              )}
+            </div>
+
+            {/* Input */}
+            <div className="space-y-1">
+              <span className="text-[10px] font-medium text-muted-foreground/50 uppercase tracking-wider flex items-center gap-1 px-1">
+                <Mic className="size-2.5" /> Microphone
+              </span>
+              <SourcePill
+                selected={inputSource.type === "none"}
+                onClick={() => setInputSource({ type: "none" })}
+                label="No Microphone"
+              />
+              <SourcePill
+                selected={inputSource.type === "default"}
+                onClick={() => setInputSource({ type: "default" })}
+                label="Default Microphone"
+              />
+              {inputDevices.map((d) => (
+                <SourcePill
+                  key={d.UID}
+                  selected={inputSource.type === "device" && inputSource.uid === d.UID}
+                  onClick={() => setInputSource({ type: "device", uid: d.UID, name: d.Name })}
+                  label={d.Name}
+                />
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
+  )
+}
+
+function SourcePill({
+  selected,
+  onClick,
+  label,
+  meta,
+}: {
+  selected: boolean
+  onClick: () => void
+  label: string
+  meta?: string
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={`flex items-center gap-2 w-full rounded-md px-2.5 py-1.5 text-left transition-all duration-150 text-xs ${
+        selected
+          ? "bg-primary/10 text-primary"
+          : "text-muted-foreground/60 hover:bg-muted/40 hover:text-muted-foreground/80"
+      }`}
+    >
+      <div className={`size-2 rounded-full border transition-all duration-150 ${
+        selected ? "border-primary bg-primary" : "border-muted-foreground/20"
+      }`} />
+      <span className="truncate">{label}</span>
+      {meta && <span className="ml-auto text-[10px] text-muted-foreground/30 shrink-0">{meta}</span>}
+    </button>
   )
 }

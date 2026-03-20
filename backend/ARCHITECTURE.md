@@ -4,8 +4,6 @@
 
 The backend replaces the Go daemon (`wavesd`) with a Python service that exposes the same JSON-RPC interface over Unix socket. The Electron app and CLI remain unchanged — they talk to the same socket with the same RPC methods.
 
-**Status**: Core backend is implemented and working. The Go CLI (`waves status`) connects successfully to the Python backend. Electron spawns the Python backend via `uv run python -m waves`.
-
 ## Directory Structure
 
 ```
@@ -16,69 +14,64 @@ backend/
     __main__.py                # Entry point: python -m waves [-v]
     server.py                  # JSON-RPC server (Unix socket, asyncio)
     config.py                  # YAML config loader (~/.config/waves/config.yaml)
-    store.py                   # Async SQLite storage (sessions, segments)
-    audio.py                   # Audio capture (spawn waves-audio, stream PCM, WAV writing)
+    store.py                   # Async SQLite storage (sessions, segments, projects, notes)
+    audio.py                   # Audio capture (spawn waves-audio, dual mode, WAV writing)
 
     providers/
       __init__.py
       base.py                  # Protocol definitions (TranscriptionProvider, LLMProvider, Segment)
+      registry.py              # Provider registry — resolves "provider|model" spec strings
 
       transcription/
         __init__.py
-        whisper_local.py       # whisper.cpp CLI (implemented, working)
-        whisper_hf.py          # HuggingFace transformers (planned)
-        openai.py              # OpenAI Whisper API (planned)
-        deepgram.py            # Deepgram API (planned)
-        custom.py              # User-defined command or REST endpoint (planned)
+        whisper_local.py       # whisper.cpp CLI (working)
+        huggingface.py         # HuggingFace transformers (working)
+        openai_whisper.py      # OpenAI Whisper API (working)
+        deepgram.py            # Deepgram API (working)
 
       llm/
         __init__.py
-        ollama.py              # Ollama REST API (planned)
-        llama_cpp.py           # llama.cpp CLI (planned)
-        anthropic.py           # Anthropic Claude API (planned)
-        openai.py              # OpenAI Chat API (planned)
-        custom.py              # User-defined REST endpoint (planned)
+        anthropic.py           # Anthropic Claude API (working)
+        openai_chat.py         # OpenAI Chat Completions API (working)
+        ollama.py              # Ollama local API (working)
 
     pipeline/
       __init__.py
-      transcription.py         # Streaming transcription orchestrator (planned)
-      enhancement.py           # Post-session transcript cleanup (planned)
-      summarization.py         # Strategy-based summary generation (planned)
-
-    strategies/                # Built-in summary strategies (planned)
-      default.md
-      standup.md
-      onboarding.md
+      summarize.py             # Multi-step workflow runner (Workflow → LLM → output)
+      enhance.py               # Two-stage pipeline: enhance_transcript() + generate_from_template()
 ```
 
-## What's Implemented
+## RPC Methods
 
-### RPC Methods
-
-| Method | Status | Notes |
-|--------|--------|-------|
-| `Waves.Status` | Working | Returns state, uptime, session count, active session |
-| `Waves.GetConfig` | Working | Returns provider names and workflow list |
-| `Waves.ListSessions` | Working | Reads from shared SQLite database |
-| `Waves.GetSession` | Working | Returns session detail with segments |
-| `Waves.StartRecording` | Working | Spawns waves-audio, saves WAV, transcribes chunks |
-| `Waves.StopRecording` | Working | Stops capture, finalizes WAV, updates session |
-| `Waves.ListDevices` | Working | Runs `waves-audio devices` |
-| `Waves.ListModels` | Working | Scans model directory for .bin/.gguf files |
-| `Waves.SetModel` | Working | Switches active whisper model |
-| `Waves.PullModel` | Stub | Returns error (not yet implemented) |
-| `Waves.Summarize` | Stub | Returns error (not yet implemented) |
-| `Waves.TranscribeFile` | Stub | Returns error (not yet implemented) |
-
-### Transcription Providers
-
-| Provider | Status | Notes |
-|----------|--------|-------|
-| `whisper-local` | Working | whisper.cpp CLI, 10s chunked streaming, temp WAV files |
-| `whisper-hf` | Planned | faster-whisper / HuggingFace transformers |
-| `openai` | Planned | OpenAI Whisper API |
-| `deepgram` | Planned | Deepgram API |
-| `custom` | Planned | User-defined command or REST endpoint |
+| Method | Description |
+|--------|-------------|
+| `Waves.Status` | Returns state, uptime, session count, active session |
+| `Waves.GetConfig` | Returns provider names and workflow list |
+| `Waves.SetConfig` | Update config, hot-swap providers if changed |
+| `Waves.ListSessions` | List sessions with optional limit |
+| `Waves.GetSession` | Session detail with segments, notes, project info |
+| `Waves.StartRecording` | Start capture (accepts PID, Device, IncludeMic, ProjectID) |
+| `Waves.StopRecording` | Stop capture, finalize WAV, trigger auto-notes |
+| `Waves.ListDevices` | List audio input devices |
+| `Waves.ListProcesses` | List processes with active audio output |
+| `Waves.ListModels` | List downloaded models (GGUF + transformers) |
+| `Waves.SetModel` | Switch active transcription model |
+| `Waves.PullModel` | Download model from HuggingFace |
+| `Waves.Summarize` | Run multi-step workflow on session transcript |
+| `Waves.TranscribeFile` | Transcribe an uploaded audio file |
+| `Waves.RetranscribeSession` | Re-transcribe session with current model |
+| `Waves.RenameSession` | Rename session (also renames audio file) |
+| `Waves.CreateProject` | Create a new project |
+| `Waves.ListProjects` | List all projects with session counts |
+| `Waves.GetProject` | Get project detail with sessions |
+| `Waves.UpdateProject` | Update project name/description |
+| `Waves.DeleteProject` | Delete project (unassigns sessions) |
+| `Waves.AssignSession` | Assign or unassign a session to/from a project |
+| `Waves.GenerateNotes` | Generate notes using template or legacy prompt |
+| `Waves.GetNotes` | List notes for a session |
+| `Waves.UpdateNote` | Update note content |
+| `Waves.DeleteNote` | Delete a note |
+| `Waves.ListNoteTemplates` | List available note templates |
 
 ## Data Models
 
@@ -87,262 +80,160 @@ backend/
 ```python
 @dataclass
 class Segment:
-    """A single transcription segment."""
     start_ms: int              # Milliseconds from recording start
     end_ms: int
     text: str
-    speaker: str | None = None # Set by enhancement pass
-    confidence: float = 1.0    # 0.0 - 1.0
+    speaker: str | None = None
+    confidence: float = 1.0
 
 @dataclass
 class Session:
-    """A recording session."""
     id: str                    # UUID
     title: str
     started_at: int            # Unix milliseconds
     ended_at: int | None
     audio_path: str
-    status: str                # recording | transcribing | enhancing | done | failed
+    status: str                # recording | transcribing | done | failed
     summary: str
     model_used: str
-```
+    project_id: str | None     # FK to projects table
 
-### RPC Types (matching existing Go interface)
+@dataclass
+class Project:
+    id: str
+    name: str
+    created_at: int
+    description: str
 
-The backend accepts and returns the same JSON shapes the Electron app expects:
-
-```python
-# Waves.Status -> StatusReply
-StatusReply = {
-    "State": "idle" | "recording",
-    "Uptime": "2h15m",
-    "TotalSessions": 42,
-    "ActiveSession": "" | "uuid"
-}
-
-# Waves.StartRecording(Title, Device, PID) -> StartReply
-StartReply = { "SessionID": "uuid" }
-
-# Waves.StopRecording -> StopReply
-StopReply = { "SessionID": "uuid", "Duration": "5m30s" }
-
-# Waves.ListSessions(Limit) -> ListReply
-ListReply = {
-    "Sessions": [
-        { "ID": "uuid", "Title": "...", "StartedAt": "...", "Duration": "...", "Status": "done" }
-    ]
-}
-
-# Waves.GetSession(ID, Summarize) -> SessionReply
-SessionReply = {
-    "Session": {
-        "Title": "...",
-        "StartedAt": "...",
-        "Duration": "...",
-        "Summary": "...",
-        "Segments": [
-            { "Timestamp": "00:01:30", "Text": "..." }
-        ]
-    }
-}
-
-# Waves.ListModels -> ModelsReply
-ModelsReply = {
-    "Models": [
-        { "Name": "...", "Type": "whisper", "Size": "140MB", "Active": true }
-    ]
-}
-
-# Waves.Summarize(SessionID, Workflow) -> SummarizeReply
-SummarizeReply = { "Summary": "..." }
+@dataclass
+class Note:
+    id: str
+    session_id: str
+    project_id: str | None
+    content: str
+    note_type: str             # template key (e.g., "general-meeting", "standup") or legacy type
+    created_at: int
+    updated_at: int
 ```
 
 ## Pipeline Design
 
-### 1. Streaming Transcription (Implemented)
+### Post-Recording Pipeline (Auto-Notes)
+
+After `StopRecording`, the backend automatically runs this pipeline in the background:
 
 ```
-waves-audio stdout (PCM16 mono 16kHz)
+Full transcript from DB
       |
       v
-AudioCapture.read_chunk(320KB)
+Stage 1: enhance_transcript()
+      |  Model: claude-haiku-4-5-20251001 (configurable)
+      |  Fixes: ASR errors, spelling, punctuation, name consistency
+      |  Preserves: original meaning, structure
       |
-      | (10-second chunks, 320KB each)
       v
-WhisperLocal.transcribe_pcm(chunk)
+Enhanced transcript
       |
       v
-Segment(start_ms, end_ms, text)
+Stage 2: generate_from_template()
+      |  Model: claude-sonnet-4-20250514 (configurable)
+      |  Input: enhanced transcript + markdown template
+      |  Output: filled-in structured meeting notes
       |
-      +---> Store.add_segment()       # Persist to DB
-      +---> (future: push to Electron via SSE/WebSocket)
+      v
+Note stored in DB, clients notified
 ```
 
-The `AudioCapture` spawns `waves-audio` as a subprocess and reads PCM from stdout, same as the Go `SubprocessCapture`. Audio is simultaneously saved to a WAV file and dispatched in chunks for transcription.
+Models are configurable independently:
+- `summarization.enhancement_model` — fast/cheap model for cleanup
+- `summarization.summarization_model` — quality model for note generation
 
-### 2. Post-Session Enhancement (Planned)
+### Manual Note Generation
 
-Runs after recording stops. Takes the raw segments and improves them:
+Users can generate notes with any template via `GenerateNotes` RPC:
+- Template-based: if `NoteType` matches a template key, runs the full two-stage pipeline
+- Legacy: "action-items" and "summary" use simple single-prompt generation
 
-```
-Store.get_segments(session_id)
-      |
-      v
-EnhancementPipeline.enhance(segments, language)
-      |
-      | Batches segments into context-window-sized groups
-      | Sends each batch to the LLM with instructions:
-      |   - Fix transcription errors
-      |   - Identify speakers if possible
-      |   - Normalize formatting
-      |   - Do NOT change meaning
-      |
-      v
-Enhanced segments written back to DB
-(original segments preserved in a separate column or table)
-```
+### Multi-Step Workflows
 
-### 3. Strategy-Based Summarization (Planned)
+The `Summarize` RPC runs configurable multi-step workflows:
 
 ```
-Store.full_transcript(session_id)
+Workflow definition (from config)
       |
-      v
-Strategy file loaded from disk (markdown with frontmatter)
-      |
-      v
-SummarizationPipeline.summarize(transcript, strategy)
-      |
-      | For each step in strategy:
+      | For each step:
       |   1. Render prompt template ({{.Transcript}}, {{.PreviousOutput}})
       |   2. Call LLMProvider.complete(prompt)
       |   3. Store output for next step
       |
       v
-Final summary stored in session
+Final output stored as session summary
 ```
 
-## Provider Interfaces
+### Note Templates
 
-### TranscriptionProvider
+Markdown templates with variable substitution and HTML comment instructions:
 
-```python
-class TranscriptionProvider(Protocol):
-    @property
-    def name(self) -> str: ...
+```markdown
+# {{.Title}}
 
-    async def transcribe_file(
-        self,
-        path: Path,
-        language: str,
-        on_progress: Callable[[float], None] | None = None,
-    ) -> list[Segment]:
-        """Transcribe an audio file. Returns all segments."""
-        ...
+**Date:** {{.Date}}
+**Duration:** {{.Duration}}
 
-class StreamingTranscriptionProvider(TranscriptionProvider, Protocol):
-    async def transcribe_stream(
-        self,
-        audio: AsyncIterator[bytes],
-        language: str,
-        chunk_seconds: int = 10,
-    ) -> AsyncIterator[Segment]:
-        """Transcribe streaming audio. Yields segments as they're ready."""
-        ...
+## Attendees
+<!-- List participants mentioned in the transcript -->
+
+## Key Points
+<!-- The most important information shared -->
+
+## Action Items
+- [ ] <!-- Task — Owner — Deadline -->
 ```
 
-### LLMProvider
+Built-in templates: `general-meeting`, `standup`. Users add custom templates in `config.yaml` under `note_templates:`.
+
+## Provider Registry
+
+Providers self-register via factory functions in `registry.py`:
 
 ```python
-class LLMProvider(Protocol):
-    @property
-    def name(self) -> str: ...
-
-    async def complete(
-        self,
-        prompt: str,
-        system: str = "",
-        max_tokens: int = 4096,
-        temperature: float = 0.3,
-    ) -> str:
-        """Generate a completion. Returns full text."""
-        ...
+# Spec format: "provider|model" or just "provider"
+resolve_llm("anthropic|claude-haiku-4-5-20251001", config)  # → AnthropicLLM instance
+resolve_transcription("huggingface|syvai/hviske-v3", config)  # → HuggingFaceProvider instance
 ```
 
 ### Adding a Provider
 
-A new provider is a single Python file that implements the protocol:
+Create a single Python file that implements the protocol and self-registers:
 
 ```python
-# backend/waves/providers/transcription/my_model.py
-from waves.providers.base import Segment
+# backend/waves/providers/llm/my_provider.py
+from waves.providers.registry import register_llm
 
-class MyModelProvider:
-    name = "my-model"
+class MyLLM:
+    def __init__(self, api_key: str, model: str):
+        self._api_key = api_key
+        self._model = model
 
-    async def transcribe_file(self, path, language, on_progress=None):
-        # ... your transcription logic ...
-        return [Segment(start_ms=..., end_ms=..., text=...)]
+    @property
+    def name(self) -> str:
+        return f"my-provider|{self._model}"
 
-    async def transcribe_pcm(self, pcm_data, language):
-        # ... write to temp WAV, transcribe ...
-        return [Segment(...)]
+    async def complete(self, prompt: str, system: str = "", max_tokens: int = 4096, temperature: float = 0.3) -> str:
+        # ... your logic ...
+        return result
+
+def _factory(model, config):
+    return MyLLM(api_key=config.summarization.my_provider.api_key, model=model or "default")
+
+register_llm("my-provider", _factory)
 ```
 
-Then register it in config:
-```yaml
-transcription:
-  provider: my-model
-  my-model:
-    model_path: /path/to/model
-```
+Then import it in `registry.py`'s `load_builtin_providers()`.
 
-## Config
+## Storage Schema
 
-Same location as before: `~/.config/waves/config.yaml`
-
-Extended with new sections:
-
-```yaml
-# Transcription
-transcription:
-  provider: whisper-local   # whisper-local | whisper-hf | openai | deepgram | custom
-  language: da              # ISO 639-1 (empty = auto)
-  whisper:
-    model: ggml-large-v3.bin
-    binary: whisper-cli
-  openai:
-    api_key: sk-...
-  deepgram:
-    api_key: ...
-  command:
-    binary: /path/to/binary
-    args: ["--input", "{{.Input}}", "--language", "{{.Language}}"]
-    output_format: json
-
-# Enhancement (post-session cleanup) — planned
-enhancement:
-  enabled: true
-  provider: ollama
-  ollama:
-    model: llama3.2
-    url: http://localhost:11434
-
-# Summarization — planned
-summarization:
-  provider: ollama
-  default_strategy: default
-  ollama:
-    model: llama3.2
-    url: http://localhost:11434
-  anthropic:
-    api_key: sk-ant-...
-    model: claude-sonnet-4-20250514
-```
-
-## Storage
-
-Same SQLite schema as Go daemon (compatible, shares the same database file):
+SQLite database at `~/Library/Application Support/Waves/waves.db`:
 
 ```sql
 CREATE TABLE sessions (
@@ -353,7 +244,8 @@ CREATE TABLE sessions (
     audio_path  TEXT,
     status      TEXT DEFAULT 'recording',
     summary     TEXT DEFAULT '',
-    model_used  TEXT DEFAULT ''
+    model_used  TEXT DEFAULT '',
+    project_id  TEXT REFERENCES projects(id)
 );
 
 CREATE TABLE segments (
@@ -364,42 +256,101 @@ CREATE TABLE segments (
     text        TEXT NOT NULL
 );
 
+CREATE TABLE projects (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    created_at  INTEGER NOT NULL,
+    description TEXT DEFAULT ''
+);
+
+CREATE TABLE notes (
+    id          TEXT PRIMARY KEY,
+    session_id  TEXT NOT NULL REFERENCES sessions(id),
+    project_id  TEXT REFERENCES projects(id),
+    content     TEXT NOT NULL DEFAULT '',
+    note_type   TEXT NOT NULL DEFAULT 'meeting-notes',
+    created_at  INTEGER NOT NULL,
+    updated_at  INTEGER NOT NULL
+);
+
 CREATE INDEX idx_segments_session ON segments(session_id);
+CREATE INDEX idx_notes_session ON notes(session_id);
+CREATE INDEX idx_notes_project ON notes(project_id);
 ```
 
-Future: add `enhanced` TEXT, `speaker` TEXT, `confidence` REAL columns to segments table for enhancement pipeline.
+Migrations run on startup (e.g., adding `project_id` column to existing sessions table).
+
+## Config
+
+Location: `~/.config/waves/config.yaml`
+
+```yaml
+transcription:
+  provider: huggingface|syvai/hviske-v3-conversation
+  language: da
+  whisper:
+    binary: whisper-cli
+    model: ggml-base.en
+  openai:
+    api_key: sk-...
+  deepgram:
+    api_key: ...
+
+summarization:
+  provider: anthropic
+  enhancement_model: claude-haiku-4-5-20251001
+  summarization_model: claude-sonnet-4-20250514
+  claude:
+    api_key: sk-ant-...
+    model: claude-sonnet-4-20250514
+  openai:
+    api_key: sk-...
+    model: gpt-4o
+  ollama:
+    model: llama3.2
+    url: http://localhost:11434
+
+note_templates:
+  general-meeting:
+    name: General Meeting
+    description: Standard meeting notes with key points, decisions, action items
+    template: |
+      # {{.Title}}
+      ...
+  standup:
+    name: Standup
+    description: Daily standup format
+    template: |
+      # Standup — {{.Date}}
+      ...
+
+workflows:
+  default:
+    steps:
+      - name: summarize
+        prompt: "Summarize: {{.Transcript}}"
+  action-items:
+    steps:
+      - name: summarize
+        prompt: "Summarize briefly: {{.Transcript}}"
+      - name: extract
+        prompt: "Extract action items from: {{.PreviousOutput}}"
+```
+
+Config is hot-swappable via `SetConfig` RPC — providers are re-resolved when changed.
 
 ## Dependencies
 
 Managed with `uv`. Run `cd backend && uv sync` to install.
 
-```toml
-[project]
-name = "waves-backend"
-requires-python = ">=3.11"
-dependencies = [
-    "pyyaml",
-    "aiosqlite",
-    "httpx",
-    "huggingface-hub",
-]
+Core: `pyyaml`, `aiosqlite`, `httpx`, `huggingface-hub`, `transformers`, `torch`, `accelerate`
 
-[project.optional-dependencies]
-local = [
-    "faster-whisper",
-    "llama-cpp-python",
-]
-```
+Optional: `faster-whisper`, `llama-cpp-python` (for local models)
 
 ## Running
 
 ```bash
-# Standalone
-cd backend && uv run python -m waves -v
-
-# Via Makefile
-make backend-run
-
-# Via Electron (automatic)
-make dev
+cd backend && uv run python -m waves -v    # standalone
+make backend-run                            # via Makefile
+make dev                                    # via Electron (automatic)
 ```

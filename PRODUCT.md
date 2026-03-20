@@ -1,8 +1,10 @@
 # Waves
 
-Local-first meeting transcription and summarization for macOS. Captures system audio from any application, transcribes in real-time with user-chosen models, and summarizes with customizable workflows.
+Local-first meeting intelligence for macOS. Captures system audio from any application, transcribes in real-time with user-chosen models, enhances transcripts, and generates structured meeting notes from configurable templates.
 
-## Why Waves?
+## Vision
+
+Waves is a meeting intelligence assistant — not just a transcription tool. The goal is enabling users to **be present in meetings** rather than attentive to note-keeping and tracking. Waves handles the notes so you don't have to.
 
 Most transcription tools lock you into English-centric cloud APIs. Waves gives you full control over the entire pipeline — which models transcribe, which clean up, which summarize — so speakers of any language (Danish, Norwegian, German, etc.) can use fine-tuned models from HuggingFace, Ollama, or any provider they choose.
 
@@ -11,49 +13,47 @@ The goal is a modular, open platform where users can plug in their own models at
 ## Core Pipeline
 
 ```
-Audio Capture  -->  Transcription  -->  Enhancement  -->  Summarization
-(waves-audio)      (streaming)         (post-session)    (strategy-based)
+Audio Capture  -->  Transcription  -->  Enhancement  -->  Note Generation
+(waves-audio)      (streaming)         (fast LLM)       (quality LLM + template)
 ```
 
 ### 1. Audio Capture
 
-macOS system audio capture via CoreAudio Process Tap API (macOS 14.2+). Captures audio from any application — browsers, Teams, Zoom, Spotify — without virtual audio drivers. Also supports microphone input.
+macOS system audio capture via CoreAudio Process Tap API (macOS 14.2+). Captures audio from any application — browsers, Teams, Zoom, Spotify — without virtual audio drivers. Also supports microphone input. Dual capture records both system audio and mic simultaneously.
 
 - Streams raw PCM16 mono 16kHz to the backend
-- Per-process capture (tap a specific app's audio)
+- Per-process capture (tap a specific app's audio) or global system audio
+- Dual mode: system audio + mic → stereo WAV (archival) + mono mix (transcription)
 - No BlackHole or Soundflower needed
 - Swift CLI (`waves-audio`) handles the macOS audio layer
 
 ### 2. Real-Time Transcription
 
-Audio chunks stream to a transcription provider as they're captured. Transcribed segments return in near real-time to the UI.
+Audio chunks stream to a transcription provider as they're captured. Transcribed segments return in near real-time.
 
-- **Default**: Whisper models (via whisper.cpp, HuggingFace, or API)
-- **Pluggable**: Any model that accepts audio and returns text segments
+- **Providers**: whisper.cpp (local), HuggingFace transformers, OpenAI Whisper API, Deepgram API
 - **Multilingual**: User picks the model — Danish Whisper, Scandinavian fine-tunes, etc.
 - **Streaming**: 10-second buffered chunks for live results during recording
+- **Pluggable**: Any model that accepts audio and returns text segments
 
 ### 3. Post-Session Enhancement
 
-After recording stops, a second pass cleans up the raw transcript:
+After recording stops, a fast LLM (default: Claude Haiku) cleans up the raw transcript:
 
 - Fix obvious transcription errors and repeated words
-- Attempt speaker diarization (distinguish who said what)
 - Normalize formatting, punctuation, proper nouns
+- Consistent name spelling throughout
 - Does NOT change meaning — only augments and corrects
 
-This runs a user-chosen LLM (local or cloud). Users who speak less-common languages can use a fine-tuned model that understands their language's patterns.
+### 4. Template-Based Note Generation
 
-### 4. Strategy-Based Summarization
+A quality LLM (default: Claude Sonnet) maps the enhanced transcript into a structured note template:
 
-A third LLM generates a structured summary based on a user-defined strategy. Strategies are simple markdown template files:
+- **General Meeting** — attendees, key points, decisions, action items, notes
+- **Standup** — team updates (yesterday/today/blockers), discussion points, action items
+- **Custom** — users create templates as markdown with `{{.Title}}`, `{{.Date}}`, `{{.Duration}}` variables and HTML comment instructions
 
-- **Customer Onboarding** — key decisions, next steps, customer requirements
-- **Standup** — what was done, blockers, action items per person
-- **Interview** — candidate assessment, key answers, red/green flags
-- **General** — concise summary with bullet points
-
-Users create and share strategies as files. Each strategy defines prompts for the summarization LLM — what to extract, how to format it.
+Templates define the structure; the LLM fills in every section with content from the transcript. Meeting notes are the **primary output** — the raw transcript is metadata.
 
 ## Model Philosophy
 
@@ -61,65 +61,56 @@ Every model in the pipeline is user-configurable:
 
 | Stage | Default | Alternatives |
 |-------|---------|-------------|
-| Transcription | whisper.cpp (local) | HuggingFace models, OpenAI Whisper API, Deepgram, custom binary |
-| Enhancement | ollama (local) | Any LLM via llama.cpp, Anthropic, OpenAI, REST endpoint |
-| Summarization | ollama (local) | Same as above |
+| Transcription | whisper.cpp / HuggingFace (local) | OpenAI Whisper API, Deepgram, custom |
+| Enhancement | Claude Haiku (cloud) | Any LLM provider |
+| Note Generation | Claude Sonnet (cloud) | Any LLM provider |
 
-**Local-first**: All stages can run entirely on-device via whisper.cpp, llama.cpp, or Ollama. No data leaves your machine unless you choose a cloud provider.
+**Local-first**: Transcription can run entirely on-device. Cloud is optional.
 
-**Cloud-optional**: Anthropic Claude, OpenAI, Deepgram, or any REST endpoint can be used for any stage. Mix and match — local transcription with cloud summarization, or vice versa.
+**Cloud-optional**: Anthropic Claude, OpenAI, Deepgram, Ollama, or any REST endpoint can be used for any stage. Mix and match.
 
-**HuggingFace native**: Download and use any compatible model directly from HuggingFace. The UI supports browsing, pulling, and switching models.
+**HuggingFace native**: Download and use any compatible model directly from HuggingFace.
 
 ## Organization
 
 ### Sessions
 
 Each recording produces a session containing:
-- Raw audio (WAV)
+- Raw audio (WAV, stereo if dual capture)
 - Timestamped transcript segments
 - Enhanced transcript (post-processing)
-- Summary (per chosen strategy)
-- Metadata (title, duration, date, model used)
+- Meeting notes (generated from template)
+- Metadata (title, duration, date, project, meeting type)
 
-### Projects & Folders
+### Projects
 
-Sessions can be organized into a hierarchical folder structure:
-- Projects contain folders and sessions
-- Folders can be nested (like Obsidian's vault)
-- Drag-and-drop organization
-- Default "Inbox" for unsorted sessions
+Sessions are organized into projects (like Notion workspaces or Obsidian vaults):
+- Projects contain related meetings
+- Notion-like sidebar with expandable project tree
+- Sessions can be assigned to projects after recording
+- Unassigned meetings appear in an inbox-style view
 
-### Strategies (Summary Templates)
+### Note Templates
 
-Markdown files that define how a session gets summarized:
+Markdown templates that define how meeting notes are structured:
 
 ```markdown
----
-name: Customer Onboarding
-description: Extract key decisions and next steps from customer calls
-model: claude-sonnet  # optional model override
----
+# {{.Title}}
 
-## Step 1: Extract Key Points
-Analyze this meeting transcript and extract:
-- Customer requirements discussed
-- Decisions made
-- Open questions
+**Date:** {{.Date}}
+**Duration:** {{.Duration}}
 
-{{.Transcript}}
+## Attendees
+<!-- List participants mentioned in the transcript -->
 
-## Step 2: Format Summary
-From the analysis above, create a structured summary:
+## Key Points
+<!-- The most important information shared -->
 
-**Customer**: [name]
-**Date**: [date]
-**Key Decisions**: [bullets]
-**Action Items**: [bullets with owner]
-**Open Questions**: [bullets]
-
-{{.PreviousOutput}}
+## Action Items
+- [ ] <!-- Task — Owner — Deadline if mentioned -->
 ```
+
+Users create and share templates. Each template defines the structure — the LLM fills it in.
 
 ## Architecture
 
@@ -132,16 +123,17 @@ Electron App (TypeScript + React)
     |
 Electron Main Process
     |
-    | Unix Socket JSON-RPC
+    | Unix Socket JSON-RPC (with retry)
     |
 Python Backend (asyncio)
     |
-    +-- Audio Manager (spawns waves-audio, receives PCM stream)
-    +-- Transcription Pipeline (pluggable providers)
-    +-- Enhancement Pipeline (post-session LLM pass)
-    +-- Summarization Pipeline (strategy-based LLM pass)
-    +-- Storage (SQLite)
-    +-- Model Manager (HuggingFace, local files)
+    +-- Audio Manager (spawns waves-audio, dual capture)
+    +-- Provider Registry (resolves "provider|model" specs)
+    +-- Transcription Pipeline (pluggable providers, streaming)
+    +-- Enhancement Pipeline (fast LLM transcript cleanup)
+    +-- Note Generation Pipeline (quality LLM + templates)
+    +-- Storage (SQLite: sessions, segments, projects, notes)
+    +-- Model Manager (HuggingFace download, local files)
     |
 waves-audio (Swift CLI)
     |
@@ -155,27 +147,6 @@ The original Go daemon works but makes it hard to integrate with the ML ecosyste
 - Most model fine-tunes, adapters, and tools are Python packages
 - Ollama and llama-cpp-python have mature Python bindings
 - Community contributions are far more likely in Python
-- Faster iteration on model integrations and new providers
-
-### Data Exchange
-
-The backend exposes the same JSON-RPC interface the Go daemon did — the Electron app doesn't need to change. Internally, each pipeline stage communicates through typed data models:
-
-**Audio -> Transcription**:
-```
-PCM16 mono 16kHz byte stream  -->  TranscriptionSegment[]
-```
-
-**Transcription -> Enhancement**:
-```
-TranscriptionSegment[]  -->  EnhancedSegment[]
-(adds: speaker, corrected_text, confidence)
-```
-
-**Enhancement -> Summarization**:
-```
-EnhancedSegment[] + Strategy  -->  Summary
-```
 
 ### Provider Interface
 
@@ -184,41 +155,37 @@ Each pipeline stage uses the same pattern:
 ```python
 class TranscriptionProvider(Protocol):
     name: str
-    async def transcribe_stream(self, audio: AsyncIterator[bytes], language: str) -> AsyncIterator[Segment]: ...
     async def transcribe_file(self, path: Path, language: str) -> list[Segment]: ...
 
 class LLMProvider(Protocol):
     name: str
-    async def complete(self, prompt: str, system: str = "") -> str: ...
-    async def stream(self, prompt: str, system: str = "") -> AsyncIterator[str]: ...
+    async def complete(self, prompt: str, system: str = "", max_tokens: int = 4096) -> str: ...
 ```
 
-Users add new providers by implementing these interfaces — a single Python file.
+Users add new providers by implementing these interfaces — a single Python file that self-registers via the registry.
 
 ## Features Summary
 
 ### Working Now
-- macOS system audio capture (Process Tap, mic)
-- Python backend with full RPC interface (Status, GetConfig, ListSessions, GetSession, StartRecording, StopRecording, ListDevices, ListModels, SetModel)
-- Streaming transcription via whisper.cpp (10s chunked)
-- Electron app with sidebar, recording UI, history
-- Daemon communication layer (IPC + Unix socket)
+- macOS system audio capture (process tap, global tap, mic, dual capture)
+- Python backend with full RPC interface (30+ methods)
+- Streaming transcription via 4 providers (whisper-local, huggingface, openai, deepgram)
+- 3 LLM providers (anthropic/claude, openai, ollama)
+- Two-stage note generation: enhancement (Haiku) → template mapping (Sonnet)
+- 2 built-in note templates (general-meeting, standup), custom templates via config
+- Auto-generate meeting notes after recording stops
+- Projects with session assignment
+- Electron app with Notion-like sidebar, project tree, recording controls
+- Process name mapping (bundle IDs → friendly names)
+- HuggingFace model download and management
 - Go CLI works with Python backend
-- Same SQLite database shared between Go and Python backends
+- Settings UI for provider/model/API key configuration
 
-### Next Up
-- [ ] Additional transcription providers (openai, deepgram, whisper-hf, custom command)
-- [ ] Post-session enhancement pipeline (LLM cleanup pass)
-- [ ] Strategy-based summarization pipeline
-- [ ] File upload transcription (TranscribeFile RPC)
-- [ ] HuggingFace model browser and downloader (PullModel RPC)
-- [ ] Electron UI completion (history detail, models page, upload page)
-
-### Future
-- [ ] Project/folder organization
-- [ ] Strategy editor in the UI
-- [ ] Speaker diarization
-- [ ] Meeting detection (auto-record)
-- [ ] Search across all transcripts
-- [ ] Export (markdown, PDF, clipboard)
-- [ ] Tray icon with recording controls
+### Planned (see PLAN.md)
+- Meeting detection & auto-record prompt
+- Unassigned meeting inbox & assignment flow
+- Meeting type selection UI
+- Inline AI editing (select text → "Edit with AI" → approve diff)
+- Calendar/mail integration
+- Custom template editor UI
+- Model management improvements

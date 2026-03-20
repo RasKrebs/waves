@@ -22,7 +22,6 @@ function UploadPage() {
       if (path) {
         setFilePath(path)
         setError(null)
-        // Pre-fill title from filename
         if (!title) {
           const name = path.split("/").pop()?.replace(/\.[^.]+$/, "") ?? ""
           setTitle(name)
@@ -39,7 +38,7 @@ function UploadPage() {
     setError(null)
     try {
       await window.waves.uploadTranscribe(filePath, title || "Uploaded recording")
-      navigate({ to: "/history" })
+      navigate({ to: "/history", search: {} })
     } catch (err: any) {
       setError(err?.message ?? "Transcription failed")
     } finally {
@@ -65,7 +64,6 @@ function UploadPage() {
           </p>
         </div>
 
-        {/* File picker area */}
         {!filePath ? (
           <button
             onClick={handlePick}
@@ -89,7 +87,6 @@ function UploadPage() {
           </div>
         )}
 
-        {/* Title + submit */}
         {filePath && (
           <div className="space-y-3">
             <div className="space-y-1.5">
@@ -102,14 +99,8 @@ function UploadPage() {
                 className="h-8 text-sm"
               />
             </div>
-
             {error && <p className="text-xs text-destructive">{error}</p>}
-
-            <Button
-              className="w-full"
-              onClick={handleTranscribe}
-              disabled={transcribing}
-            >
+            <Button className="w-full" onClick={handleTranscribe} disabled={transcribing}>
               {transcribing ? (
                 <>
                   <Loader2 className="size-4 animate-spin mr-2" />

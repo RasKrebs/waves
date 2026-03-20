@@ -9,12 +9,14 @@ import {
   dialog,
   protocol,
   net,
+  Notification,
 } from 'electron'
 import path from 'path'
 import { spawn, ChildProcess } from 'child_process'
 import fs from 'fs'
 import os from 'os'
 import { DaemonClient } from './daemon.cjs'
+import { MeetingDetector, DetectedMeeting } from './meeting-detector.cjs'
 
 const isDev = !app.isPackaged
 
@@ -22,6 +24,7 @@ let tray: Tray | null = null
 let mainWindow: BrowserWindow | null = null
 let daemon: ChildProcess | null = null
 let daemonClient: DaemonClient
+let meetingDetector: MeetingDetector
 let isQuitting = false
 
 // -- Daemon health tracking --
@@ -89,6 +92,8 @@ app.whenReady().then(async () => {
   })
   await startDaemon()
   daemonClient = new DaemonClient()
+  meetingDetector = new MeetingDetector(daemonClient)
+  setupMeetingDetector()
 
   createTray()
   createMainWindow()
@@ -184,7 +189,7 @@ async function waitForDaemon(timeoutMs: number) {
 function createTray() {
   const icon = buildTrayIcon(false)
   tray = new Tray(icon)
-  tray.setToolTip('Waves')
+  tray.setToolTip('Waves — Click to show')
   updateTrayMenu(false)
   tray.on('click', () => toggleMainWindow())
 }
@@ -208,32 +213,44 @@ function updateTrayMenu(isRecording: boolean) {
     { type: 'separator' },
     {
       label: 'Show Window',
+      accelerator: 'CommandOrControl+Shift+W',
       click: () => toggleMainWindow(),
     },
     { type: 'separator' },
     {
-      label: 'Start Recording',
-      enabled: !isRecording,
+      label: isRecording ? 'Stop Recording' : 'Start Recording',
+      accelerator: 'CommandOrControl+Shift+R',
       click: () => {
-        daemonClient.startRecording('').then(() => {
-          mainWindow?.webContents.send('recording:started')
-          updateTrayMenu(true)
-        })
+        if (isRecording) {
+          daemonClient.stopRecording().then((res) => {
+            meetingDetector.setRecording(false)
+            mainWindow?.webContents.send('recording:stopped', res)
+            updateTrayMenu(false)
+            if (res.SessionID) pollForNotes(res.SessionID)
+          })
+        } else {
+          daemonClient.startRecording('').then((res) => {
+            meetingDetector.setRecording(true)
+            mainWindow?.webContents.send('recording:started', res)
+            updateTrayMenu(true)
+          })
+        }
       },
     },
+    { type: 'separator' },
     {
-      label: 'Stop Recording',
-      enabled: isRecording,
+      label: 'View Meetings',
       click: () => {
-        daemonClient.stopRecording().then(() => {
-          mainWindow?.webContents.send('recording:stopped')
-          updateTrayMenu(false)
-        })
+        if (!mainWindow?.isVisible()) {
+          mainWindow?.show()
+          app.focus({ steal: true })
+        }
       },
     },
     { type: 'separator' },
     {
       label: 'Quit',
+      accelerator: 'CommandOrControl+Q',
       click: () => {
         isQuitting = true
         app.quit()
@@ -288,13 +305,111 @@ function toggleMainWindow() {
   }
 }
 
+// -- Auto-notes polling --
+
+function pollForNotes(sessionId: string, maxAttempts = 30, intervalMs = 2000) {
+  let attempts = 0
+  const timer = setInterval(async () => {
+    attempts++
+    try {
+      const res = await daemonClient.getNotes(sessionId)
+      if (res.Notes && res.Notes.length > 0) {
+        clearInterval(timer)
+        pushLog(`Auto-notes ready for session ${sessionId.slice(0, 8)}`)
+        mainWindow?.webContents.send('notes:ready', { SessionID: sessionId, Notes: res.Notes })
+      } else if (attempts >= maxAttempts) {
+        clearInterval(timer)
+        pushLog(`Auto-notes timeout for session ${sessionId.slice(0, 8)}`)
+      }
+    } catch {
+      if (attempts >= maxAttempts) clearInterval(timer)
+    }
+  }, intervalMs)
+}
+
+// -- Meeting detection --
+
+function setupMeetingDetector() {
+  meetingDetector.setCallbacks(
+    // Meeting detected
+    (meeting: DetectedMeeting) => {
+      pushLog(`Meeting detected: ${meeting.appName} (PID ${meeting.pid})`)
+      mainWindow?.webContents.send('meeting:detected', {
+        PID: meeting.pid,
+        BundleID: meeting.bundleId,
+        AppName: meeting.appName,
+      })
+
+      // Show native notification
+      if (Notification.isSupported()) {
+        const notification = new Notification({
+          title: 'Meeting Detected',
+          body: `${meeting.appName} is active. Would you like to record?`,
+          silent: true,
+          actions: [
+            { type: 'button' as const, text: 'Record' },
+            { type: 'button' as const, text: 'Dismiss' },
+          ],
+        })
+
+        notification.on('action', (_event, index) => {
+          if (index === 0) {
+            // Record
+            daemonClient.startRecording('', { PID: meeting.pid }).then((res) => {
+              meetingDetector.setRecording(true)
+              mainWindow?.webContents.send('recording:started', res)
+              updateTrayMenu(true)
+              // Show window so user can see
+              if (!mainWindow?.isVisible()) {
+                mainWindow?.show()
+                app.focus({ steal: true })
+              }
+            }).catch((err) => pushLog(`Auto-record failed: ${err}`))
+          } else {
+            // Dismiss
+            meetingDetector.dismiss(meeting.pid)
+          }
+        })
+
+        notification.on('click', () => {
+          // Clicking the notification itself shows the window
+          if (!mainWindow?.isVisible()) {
+            mainWindow?.show()
+            app.focus({ steal: true })
+          }
+        })
+
+        notification.on('close', () => {
+          // If user closes notification without action, dismiss this meeting
+          meetingDetector.dismiss(meeting.pid)
+        })
+
+        notification.show()
+      }
+    },
+    // Meeting ended
+    (meeting: DetectedMeeting) => {
+      pushLog(`Meeting ended: ${meeting.appName} (PID ${meeting.pid})`)
+      mainWindow?.webContents.send('meeting:ended', {
+        PID: meeting.pid,
+        BundleID: meeting.bundleId,
+        AppName: meeting.appName,
+      })
+    },
+  )
+
+  // Start polling after daemon is ready
+  meetingDetector.start()
+}
+
 // -- IPC handlers --
 
 function setupIpcHandlers() {
   ipcMain.handle('daemon:status', () => daemonClient.getStatus())
 
-  ipcMain.handle('recording:start', (_, title: string) =>
-    daemonClient.startRecording(title).then((res) => {
+  ipcMain.handle('recording:start', (_, title: string, opts: { PID?: number; Device?: string; IncludeMic?: boolean; ProjectID?: string } = {}) =>
+    daemonClient.startRecording(title, opts).then((res) => {
+      meetingDetector.setRecording(true)
       updateTrayMenu(true)
       mainWindow?.webContents.send('recording:started', res)
       return res
@@ -303,8 +418,15 @@ function setupIpcHandlers() {
 
   ipcMain.handle('recording:stop', () =>
     daemonClient.stopRecording().then((res) => {
+      meetingDetector.setRecording(false)
       updateTrayMenu(false)
       mainWindow?.webContents.send('recording:stopped', res)
+
+      // Poll for auto-generated notes (backend generates them async after stop)
+      if (res.SessionID) {
+        pollForNotes(res.SessionID)
+      }
+
       return res
     })
   )
@@ -316,10 +438,45 @@ function setupIpcHandlers() {
   ipcMain.handle('models:pull', (_, repo: string) => daemonClient.pullModel(repo))
   ipcMain.handle('models:set', (_, name: string) => daemonClient.setModel(name))
   ipcMain.handle('devices:list', () => daemonClient.listDevices())
+  ipcMain.handle('processes:list', () => daemonClient.listProcesses())
   ipcMain.handle('config:get', () => daemonClient.getConfig())
   ipcMain.handle('config:set', (_, config: Record<string, unknown>) => daemonClient.setConfig(config))
   ipcMain.handle('sessions:retranscribe', (_, id: string) => daemonClient.retranscribeSession(id))
   ipcMain.handle('sessions:rename', (_, id: string, title: string) => daemonClient.renameSession(id, title))
+  ipcMain.handle('sessions:delete', (_, id: string) => daemonClient.deleteSession(id))
+
+  // Projects
+  ipcMain.handle('projects:create', (_, name: string, description: string) => daemonClient.createProject(name, description))
+  ipcMain.handle('projects:list', () => daemonClient.listProjects())
+  ipcMain.handle('projects:get', (_, id: string) => daemonClient.getProject(id))
+  ipcMain.handle('projects:update', (_, id: string, name: string, description: string) => daemonClient.updateProject(id, name, description))
+  ipcMain.handle('projects:delete', (_, id: string) => daemonClient.deleteProject(id))
+  ipcMain.handle('projects:assign', (_, sessionId: string, projectId: string | null) => daemonClient.assignSession(sessionId, projectId))
+  ipcMain.handle('sessions:setMeetingType', (_, sessionId: string, meetingType: string | null, regenerate: boolean) => daemonClient.setMeetingType(sessionId, meetingType, regenerate))
+  ipcMain.handle('sessions:listUnassigned', () => daemonClient.listUnassignedSessions())
+
+  // Notes
+  ipcMain.handle('notes:generate', (_, sessionId: string, noteType: string) => daemonClient.generateNotes(sessionId, noteType))
+  ipcMain.handle('notes:list', (_, sessionId: string) => daemonClient.getNotes(sessionId))
+  ipcMain.handle('notes:update', (_, id: string, content: string) => daemonClient.updateNote(id, content))
+  ipcMain.handle('notes:delete', (_, id: string) => daemonClient.deleteNote(id))
+  ipcMain.handle('notes:templates', (_, includeContent?: boolean) => daemonClient.listNoteTemplates(includeContent ?? false))
+  ipcMain.handle('notes:edit', (_, noteId: string, selection: string, instruction: string) => daemonClient.editNote(noteId, selection, instruction))
+
+  // Template CRUD
+  ipcMain.handle('templates:create', (_, key: string, name: string, description: string, template: string) => daemonClient.createNoteTemplate(key, name, description, template))
+  ipcMain.handle('templates:update', (_, key: string, name: string, description: string, template: string) => daemonClient.updateNoteTemplate(key, name, description, template))
+  ipcMain.handle('templates:delete', (_, key: string) => daemonClient.deleteNoteTemplate(key))
+
+  // Meeting detection
+  ipcMain.handle('meeting:dismiss', (_, pid: number) => {
+    meetingDetector.dismiss(pid)
+  })
+  ipcMain.handle('meeting:active', () => {
+    const m = meetingDetector.getActiveMeeting()
+    if (!m) return null
+    return { PID: m.pid, BundleID: m.bundleId, AppName: m.appName }
+  })
 
   ipcMain.handle('upload:pick', async () => {
     const result = await dialog.showOpenDialog(mainWindow!, {

@@ -1,15 +1,15 @@
 # Waves
 
-Local-first macOS meeting transcription and summarization app. Captures system audio from any application (no virtual audio driver needed), transcribes with pluggable backends, and summarizes with configurable LLM workflows.
+Local-first macOS meeting intelligence app. Captures system audio from any application (no virtual audio driver needed), transcribes with pluggable backends, enhances transcripts with a fast LLM, and generates structured meeting notes from configurable templates.
 
 ## Architecture
 
 Four components communicating over Unix socket JSON-RPC:
 
-1. **Python backend** (`backend/waves/`) - spawns waves-audio, runs transcription/summarization, SQLite storage
+1. **Python backend** (`backend/waves/`) - spawns waves-audio, runs transcription/enhancement/summarization, SQLite storage
 2. **`waves`** (Go CLI) - user-facing commands for recording, playback, model management
 3. **`waves-audio`** (Swift CLI) - audio capture via CoreAudio Process Tap and AVAudioEngine
-4. **Electron app** (TypeScript + React) - menu bar app with meeting detection, live transcript UI
+4. **Electron app** (TypeScript + React) - menu bar app with Notion-like sidebar, recording controls, meeting notes UI
 
 The backend is the single source of truth. Both the CLI and Electron app are thin clients that call RPC methods on it. The backend spawns `waves-audio` as a subprocess and reads raw PCM16 mono 16kHz from its stdout.
 
@@ -25,14 +25,23 @@ backend/                          # Python backend (replaces Go daemon)
     __main__.py                   # Entry point: python -m waves
     server.py                     # JSON-RPC server (Unix socket, asyncio)
     config.py                     # YAML config loader (~/.config/waves/config.yaml)
-    store.py                      # Async SQLite (sessions + segments tables)
+    store.py                      # Async SQLite (sessions, segments, projects, notes)
     audio.py                      # Spawn waves-audio subprocess, stream PCM, WAV writing
     providers/
       base.py                     # Protocol definitions (TranscriptionProvider, LLMProvider)
+      registry.py                 # Provider registry — resolves "provider|model" specs
       transcription/
         whisper_local.py          # whisper.cpp CLI backend (local)
-      llm/                        # (not yet implemented)
-    pipeline/                     # (not yet implemented)
+        huggingface.py            # HuggingFace transformers backend
+        openai_whisper.py         # OpenAI Whisper API
+        deepgram.py               # Deepgram API
+      llm/
+        anthropic.py              # Anthropic Claude API
+        openai_chat.py            # OpenAI Chat Completions API
+        ollama.py                 # Ollama local API
+    pipeline/
+      summarize.py                # Multi-step workflow runner
+      enhance.py                  # Two-stage pipeline: transcript enhancement + template mapping
 
 cmd/                              # Go (legacy, still functional)
   wavesd/main.go                  # Go daemon entry point
@@ -77,19 +86,35 @@ tools/
 electron/
   main/
     index.cts                     # Electron main process (tray, windows, Python backend lifecycle)
-    daemon.cts                    # Unix socket JSON-RPC client
+    daemon.cts                    # Unix socket JSON-RPC client (with retry on connect)
     preload.cts                   # Secure bridge: window.waves.* API for renderer
   src/
     routes/                       # TanStack Router file-based routes
+      __root.tsx                  # Root layout (sidebar + content area)
+      index.tsx                   # Redirects to /history
+      history.tsx                 # Meetings list + detail with notes (supports ?session=id deep-link)
+      record.tsx                  # Advanced recording with source picker
+      upload.tsx                  # File upload for transcription
+      projects.tsx                # Project management
+      models.tsx                  # Model management
+    lib/
+      process-names.ts            # Maps macOS bundle IDs to friendly names
     types/waves.d.ts              # TypeScript types for renderer
     main.tsx                      # Renderer entry point
-  components/                     # shadcn/ui components
+    routeTree.gen.ts              # TanStack Router route tree (manually maintained)
+  components/
+    app-sidebar.tsx               # Notion-like sidebar: recording controls, project tree, nav
+    settings-dialog.tsx           # Settings dialog (General/Transcription/Summarization/Models)
+    ui/                           # shadcn/ui components
 
 scripts/
   setup.sh                       # Checks/installs dependencies
   install-cli.sh                  # Build + install CLI
   install-app.sh                  # Build + package Electron .dmg
   install-all.sh                  # Both CLI and app
+
+PLAN.md                           # Feature roadmap (meeting detection, inline AI editing, etc.)
+PRODUCT.md                        # Product vision and pipeline design
 ```
 
 ## Key Design Decisions
@@ -101,12 +126,19 @@ scripts/
 - **Audio capture via waves-audio** (Swift CLI) - uses CoreAudio Process Tap API (macOS 14.2+) for per-process capture without BlackHole. Falls back to AVAudioEngine for mic input. Binary must be ad-hoc code-signed with `com.apple.security.device.audio-input` entitlement or macOS will SIGKILL it. Do NOT add app-sandbox entitlement — it breaks stdout pipe output
 - **Process tap requires "Screen & System Audio Recording" permission** in System Settings > Privacy & Security. Without it, audio buffers are silently zeroed by macOS
 - **Some apps use helper subprocesses for audio** (e.g., Spotify uses `com.spotify.client.helper`). The main app PID may show as inactive (`○`) in `waves-audio list` while the helper has the actual audio stream
-- **Config file at `~/.config/waves/config.yaml`** - YAML, loaded once at backend startup
-- **Transcription is pluggable** via `TranscriptionProvider` protocol. Currently only `whisper-local` (whisper.cpp CLI) is implemented in Python; more providers coming
-- **Summarization is pluggable** via `LLMProvider` protocol + `Workflow` pipelines (multi-step prompts with `{{.Transcript}}` and `{{.PreviousOutput}}` templates)
+- **Config file at `~/.config/waves/config.yaml`** - YAML, loaded once at backend startup, hot-swappable via SetConfig RPC
+- **Provider registry** (`providers/registry.py`) — providers self-register via factory functions. Spec format: `"provider|model"` (e.g., `"anthropic|claude-haiku-4-5-20251001"`)
+- **Two-stage note generation pipeline** — Enhancement (fast LLM fixes ASR errors) → Template mapping (quality LLM fills structured template). Models configurable independently: `summarization.enhancement_model` and `summarization.summarization_model`
+- **Note templates** — Markdown templates with `{{.Title}}`, `{{.Date}}`, `{{.Duration}}` variables and HTML comment instructions for the LLM. Defaults: "general-meeting" and "standup". Users add custom templates in config YAML under `note_templates:`
+- **Dual audio capture** — Backend can run two `waves-audio` subprocesses simultaneously (system audio tap + microphone). Interleaves to stereo WAV for archival, mixes to mono for transcription
+- **Transcription is pluggable** via `TranscriptionProvider` protocol. Implemented: whisper-local, huggingface, openai, deepgram
+- **LLM is pluggable** via `LLMProvider` protocol. Implemented: anthropic/claude, openai, ollama
+- **Summarization uses Workflow pipelines** — multi-step prompts with `{{.Transcript}}` and `{{.PreviousOutput}}` templates
 - **Language is a top-level transcription config field** (`transcription.language`) passed to all providers. Owner is not a native English speaker
 - **Preload exposes `window.waves.*`** - all renderer<->main IPC goes through typed handlers
 - **Electron app hides dock icon** (`LSUIElement: true`) - lives in the menu bar only
+- **Daemon client has retry logic** — up to 5 retries with backoff when socket isn't ready yet (handles startup race condition)
+- **Process name mapping** (`process-names.ts`) — maps macOS bundle IDs (e.g., `com.spotify.client`) to friendly names (e.g., "Spotify") for the UI
 
 ## Build & Run
 
@@ -133,28 +165,39 @@ make run-daemon                   # go run ./cmd/wavesd -v
 
 ## Current State / What Works
 
-- **Python backend** running and serving all core RPC methods (Status, GetConfig, ListSessions, GetSession, StartRecording, StopRecording, ListDevices, ListModels, SetModel)
+- **Python backend** running and serving all RPC methods
+- **Full RPC surface**: Status, GetConfig, SetConfig, ListSessions, GetSession, StartRecording, StopRecording, ListDevices, ListProcesses, ListModels, SetModel, PullModel, Summarize, TranscribeFile, RetranscribeSession, RenameSession
+- **Projects**: CreateProject, ListProjects, GetProject, UpdateProject, DeleteProject, AssignSession
+- **Notes**: GenerateNotes, GetNotes, UpdateNote, DeleteNote, ListNoteTemplates
+- **Two-stage note generation**: Enhancement (Haiku) → Template mapping (Sonnet) with configurable models
+- **Note templates**: "general-meeting" and "standup" built-in, user-customizable via config
+- **Dual audio capture**: System audio + microphone recorded simultaneously, stereo WAV archival
+- **4 transcription providers**: whisper-local, huggingface, openai, deepgram
+- **3 LLM providers**: anthropic/claude, openai, ollama
+- **Auto-generate notes** after recording stops (background task)
 - **Go CLI works with Python backend** — `waves status` connects and shows correct state
-- **Same SQLite database** — Python backend reads/writes the same `waves.db` as the Go daemon
-- **Electron app spawns Python backend** via `uv run python -m waves`
+- **Same SQLite database** — Python backend reads/writes the same `waves.db`
+- **Electron app** with Notion-like sidebar, project tree, recording controls, session detail with meeting notes
+- **Process name mapping** — bundle IDs shown as friendly app names in source picker
+- **Daemon retry logic** — Electron handles socket not-ready race condition gracefully
 - Audio capture via waves-audio Swift CLI (process tap + mic), no BlackHole needed
 - Process tap capture confirmed working (Chromium browsers, Voice Memos, Spotify via helper PID)
 - Live recording saves raw audio as WAV to ~/Library/Application Support/Waves/recordings/
-- Streaming transcription via whisper.cpp CLI (10s chunked) implemented in Python
-- Go daemon still functional as fallback (all providers implemented there)
-- Electron app scaffolded with all views, meeting detection, tray, banner
+- Streaming transcription (10s chunked) implemented
+- HuggingFace model download via PullModel RPC
 
 ## Known Gaps / Next Steps
 
-- **Python backend: more transcription providers** — only `whisper-local` implemented; need openai, deepgram, whisper-hf, custom command
-- **Python backend: summarization** — not yet implemented (Summarize RPC returns error)
-- **Python backend: enhancement pipeline** — not yet implemented
-- **Python backend: file transcription** — not yet implemented (TranscribeFile RPC returns error)
-- **Python backend: model download** — PullModel RPC not yet implemented
-- **No tests** - needs unit tests for store, transcription parsing, workflow engine
-- **No real-time segment push** - backend stores segments but doesn't push them to Electron yet
-- **Electron not fully tested end-to-end** - the full dev flow hasn't been validated in a live session
-- **No tray icons** - references `assets/tray-idle.png` and `tray-recording.png` which don't exist yet
-- **No code signing** - Electron packaging works but the app won't be signed for distribution
-- **Config changes require backend restart** - no hot-reload of config
-- **Process tap warmup** - first few IO callbacks (~4) return zero-filled buffers; short recordings (<7s) may miss audio
+See `PLAN.md` for the full feature roadmap. Key gaps:
+
+- **Meeting detection** — auto-detect Teams/Zoom/Meet and prompt to record (planned, not implemented)
+- **Unassigned meeting flow** — no inbox/banner for meetings without a project
+- **Meeting type selection** — users can't pick standup vs general from the UI yet (backend supports it)
+- **Inline AI editing** — select text in notes, right-click "Edit with AI" (not implemented)
+- **Calendar integration** — infer project/meeting type from calendar events (future)
+- **Custom templates UI** — templates only editable via YAML config, no in-app editor
+- **No tests** — needs unit tests for store, transcription parsing, pipeline
+- **No real-time segment push** — backend stores segments but doesn't push to Electron yet
+- **No tray icons** — references `assets/tray-idle.png` and `tray-recording.png` which don't exist yet
+- **No code signing** — Electron packaging works but the app won't be signed for distribution
+- **Process tap warmup** — first few IO callbacks (~4) return zero-filled buffers; short recordings (<7s) may miss audio

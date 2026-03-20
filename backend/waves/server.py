@@ -14,8 +14,10 @@ from typing import Any
 
 from waves.audio import AudioCapture, finalize_wav_header, write_wav_header
 from waves.config import Config, update as update_config
+from waves.pipeline.edit import edit_note_selection
+from waves.pipeline.enhance import enhance_transcript, generate_from_template
 from waves.pipeline.summarize import run_workflow
-from waves.store import Segment, Session, Store
+from waves.store import Note, Project, Segment, Session, Store
 
 log = logging.getLogger(__name__)
 
@@ -89,6 +91,10 @@ class WavesServer:
 
             writer.write((json.dumps(response) + "\n").encode())
             await writer.drain()
+        except ConnectionResetError:
+            pass  # Client disconnected (e.g. timeout) — nothing to do
+        except BrokenPipeError:
+            pass  # Client disconnected
         except Exception:
             log.exception("Client handler error")
         finally:
@@ -108,6 +114,7 @@ class WavesServer:
             "Waves.StartRecording": self._start_recording,
             "Waves.StopRecording": self._stop_recording,
             "Waves.ListDevices": self._list_devices,
+            "Waves.ListProcesses": self._list_processes,
             "Waves.ListModels": self._list_models,
             "Waves.SetModel": self._set_model,
             "Waves.PullModel": self._pull_model,
@@ -115,7 +122,27 @@ class WavesServer:
             "Waves.TranscribeFile": self._transcribe_file,
             "Waves.RetranscribeSession": self._retranscribe_session,
             "Waves.RenameSession": self._rename_session,
+            "Waves.DeleteSession": self._delete_session,
             "Waves.SetConfig": self._set_config,
+            # Projects
+            "Waves.CreateProject": self._create_project,
+            "Waves.ListProjects": self._list_projects,
+            "Waves.GetProject": self._get_project,
+            "Waves.UpdateProject": self._update_project,
+            "Waves.DeleteProject": self._delete_project,
+            "Waves.AssignSession": self._assign_session,
+            "Waves.SetMeetingType": self._set_meeting_type,
+            "Waves.ListUnassignedSessions": self._list_unassigned_sessions,
+            # Notes
+            "Waves.GenerateNotes": self._generate_notes,
+            "Waves.GetNotes": self._get_notes,
+            "Waves.UpdateNote": self._update_note,
+            "Waves.DeleteNote": self._delete_note,
+            "Waves.ListNoteTemplates": self._list_note_templates,
+            "Waves.EditNote": self._edit_note,
+            "Waves.CreateNoteTemplate": self._create_note_template,
+            "Waves.UpdateNoteTemplate": self._update_note_template,
+            "Waves.DeleteNoteTemplate": self._delete_note_template,
         }
         handler = handlers.get(method)
         if not handler:
@@ -216,6 +243,8 @@ class WavesServer:
                 "StartedAt": _format_time(s.started_at),
                 "Duration": dur,
                 "Status": s.status,
+                "ProjectID": s.project_id or "",
+                "MeetingType": s.meeting_type or "",
             })
         return {"Sessions": result}
 
@@ -229,6 +258,7 @@ class WavesServer:
             raise ValueError(f"session not found: {session_id}")
 
         segs = await self.store.get_segments(sess.id)
+        notes = await self.store.get_notes_for_session(sess.id)
 
         dur = ""
         if sess.ended_at is not None:
@@ -239,6 +269,17 @@ class WavesServer:
             ts = _format_timestamp(seg.start_ms)
             segments.append({"Timestamp": ts, "Text": seg.text})
 
+        note_views = [
+            {
+                "ID": n.id,
+                "Content": n.content,
+                "NoteType": n.note_type,
+                "CreatedAt": _format_time(n.created_at),
+                "UpdatedAt": _format_time(n.updated_at),
+            }
+            for n in notes
+        ]
+
         return {
             "Session": {
                 "Title": sess.title,
@@ -247,6 +288,9 @@ class WavesServer:
                 "Summary": sess.summary,
                 "Segments": segments,
                 "AudioPath": sess.audio_path or "",
+                "ProjectID": sess.project_id or "",
+                "MeetingType": sess.meeting_type or "",
+                "Notes": note_views,
             }
         }
 
@@ -259,6 +303,8 @@ class WavesServer:
             title = args.get("Title", "") or f"Meeting {time.strftime('%Y-%m-%d %H:%M')}"
             pid = args.get("PID", 0)
             device = args.get("Device", "")
+            include_mic = args.get("IncludeMic", False)
+            project_id = args.get("ProjectID") or None
 
             recordings_dir = Path(self.data_dir) / "recordings"
             recordings_dir.mkdir(parents=True, exist_ok=True)
@@ -271,17 +317,30 @@ class WavesServer:
                 started_at=now_ms,
                 audio_path=audio_path,
                 status="recording",
+                project_id=project_id,
             )
             await self.store.create_session(sess)
 
             # Start audio capture
-            if pid > 0:
+            # Determine capture mode from PID + IncludeMic flags:
+            #   PID>0 + mic  → dual (process tap + mic)
+            #   PID<=0 + mic → dual (all system audio + mic)
+            #   PID>0 only   → single process tap
+            #   PID<=0 only  → single system audio tap (tap-all)
+            #   mic only     → mic capture (only when no system audio source)
+            if include_mic and pid > 0:
+                await self.audio.start_dual(pid=pid, device_uid=device)
+            elif include_mic:
+                await self.audio.start_dual(pid=-1, device_uid=device)
+            elif pid > 0:
                 await self.audio.start_tap(pid)
             else:
-                await self.audio.start_mic(device)
+                # System audio only (no mic) — use tap-all
+                await self.audio.start_tap(-1)
 
             # Start transcription loop in background
-            task = asyncio.create_task(self._recording_loop(session_id, audio_path))
+            channels = self.audio.channels
+            task = asyncio.create_task(self._recording_loop(session_id, audio_path, channels))
             self._active = ActiveSession(session=sess, task=task)
 
         return {"SessionID": session_id}
@@ -311,44 +370,162 @@ class WavesServer:
         active.session.status = "done"
         await self.store.update_session(active.session)
 
+        # Auto-generate meeting notes in the background
+        asyncio.create_task(self._auto_generate_notes(active.session.id))
+
         return {
             "SessionID": active.session.id,
             "Duration": _format_duration(dur_ms),
         }
 
-    async def _recording_loop(self, session_id: str, audio_path: str) -> None:
+    def _resolve_llm_for_model(self, model: str) -> Any:
+        """Create an LLM provider instance for a specific model.
+
+        Uses the same provider type and API key as the main LLM but overrides the model.
+        """
+        from waves.providers.registry import resolve_llm
+        provider_base = self.config.summarization.provider.split("|")[0]
+        return resolve_llm(f"{provider_base}|{model}", self.config)
+
+    async def _auto_generate_notes(self, session_id: str) -> None:
+        """Automatically generate meeting notes after recording stops.
+
+        Two-stage pipeline:
+        1. Enhancement (fast model): fix transcription errors
+        2. Template mapping (quality model): map into structured note template
+
+        Runs in the background so _stop_recording returns immediately.
+        """
+        if not self.llm:
+            log.info("Skipping auto-notes: no LLM provider configured")
+            return
+
+        try:
+            transcript = await self.store.full_transcript(session_id)
+            if not transcript or len(transcript.strip()) < 20:
+                log.info("Skipping auto-notes for %s: transcript too short", session_id[:8])
+                return
+
+            sess = await self.store.get_session(session_id)
+            if not sess:
+                return
+
+            log.info("Auto-generating meeting notes for session %s", session_id[:8])
+
+            # Stage 1: Enhance transcript with fast model (fix ASR errors)
+            enhancement_model = self.config.summarization.enhancement_model
+            try:
+                enhancer = self._resolve_llm_for_model(enhancement_model)
+                enhanced = await enhance_transcript(
+                    enhancer, transcript,
+                    language_hint=self.config.transcription.language,
+                )
+            except Exception:
+                log.warning("Enhancement failed, using raw transcript", exc_info=True)
+                enhanced = transcript
+
+            # Stage 2: Map enhanced transcript into template
+            # Use session's meeting_type if set, otherwise default to "general-meeting"
+            template_key = sess.meeting_type or "general-meeting"
+            template = self.config.note_templates.get(template_key)
+
+            summarization_model = self.config.summarization.summarization_model
+            try:
+                summarizer = self._resolve_llm_for_model(summarization_model)
+            except Exception:
+                log.warning("Could not create summarizer with model %s, using default", summarization_model)
+                summarizer = self.llm
+
+            if template:
+                import datetime
+                date_str = datetime.datetime.fromtimestamp(
+                    sess.started_at / 1000, tz=datetime.timezone.utc
+                ).strftime("%Y-%m-%d %H:%M")
+                dur = ""
+                if sess.ended_at:
+                    dur = _format_duration(sess.ended_at - sess.started_at)
+
+                content = await generate_from_template(
+                    summarizer, enhanced, template.template,
+                    title=sess.title, date=date_str, duration=dur,
+                )
+            else:
+                # Fallback: simple prompt
+                prompt = (
+                    "Produce well-structured meeting notes in markdown.\n"
+                    "Include: Key Points, Decisions, Action Items, Summary.\n\n"
+                    f"TRANSCRIPT:\n{enhanced}"
+                )
+                content = await summarizer.complete(prompt, system="You are a helpful meeting assistant.")
+
+            now_ms = int(time.time() * 1000)
+            note = Note(
+                id=str(uuid.uuid4()),
+                session_id=session_id,
+                project_id=sess.project_id,
+                content=content,
+                note_type=template_key,
+                created_at=now_ms,
+                updated_at=now_ms,
+            )
+            await self.store.create_note(note)
+            log.info("Auto-generated meeting notes for session %s", session_id[:8])
+
+            # Notify connected clients
+            self._emit_event("notes:generated", {
+                "SessionID": session_id,
+                "NoteID": note.id,
+                "NoteType": note.note_type,
+            })
+
+        except Exception:
+            log.exception("Auto-note generation failed for session %s", session_id[:8])
+
+    def _emit_event(self, event: str, data: dict) -> None:
+        """Emit an event to the event log. Electron polls or subscribes to these."""
+        # Store in a simple list for now — clients can poll via GetSession
+        # which already returns notes. The event name is logged for debugging.
+        log.info("Event: %s %s", event, data)
+
+    async def _recording_loop(self, session_id: str, audio_path: str, channels: int = 1) -> None:
         """Read PCM from waves-audio, save WAV, and transcribe in chunks."""
         chunk_size = BYTES_PER_SECOND * CHUNK_SECONDS
         chunk_idx = 0
+        is_dual = channels == 2
 
         try:
             with open(audio_path, "wb") as f:
-                write_wav_header(f)
+                write_wav_header(f, channels=channels)
 
                 while self.audio.capturing:
-                    data = await self.audio.read_chunk(chunk_size)
-                    if not data:
+                    if is_dual:
+                        # Single read pass returns both stereo (WAV) and mono (transcription)
+                        wav_data, mono_data = await self.audio.read_dual_chunks(chunk_size)
+                    else:
+                        mono_data = await self.audio.read_chunk(chunk_size)
+                        wav_data = mono_data
+
+                    if not wav_data and not mono_data:
                         break
 
-                    # Write to WAV file
-                    f.write(data)
+                    # Write to WAV file (stereo in dual mode, mono otherwise)
+                    f.write(wav_data)
                     f.flush()
 
-                    # Transcribe chunk if we have a provider
-                    if self.transcriber and len(data) > 0:
+                    # Transcribe the mono mix
+                    if self.transcriber and mono_data:
                         offset_ms = chunk_idx * CHUNK_SECONDS * 1000
                         chunk_idx += 1
-                        # Run transcription in background so we don't block reading
                         asyncio.create_task(
-                            self._transcribe_chunk(session_id, data, offset_ms)
+                            self._transcribe_chunk(session_id, mono_data, offset_ms)
                         )
 
-                # Finalize WAV header
                 finalize_wav_header(f)
 
             log.info("Saved audio to %s", audio_path)
         except Exception:
             log.exception("Recording loop error for session %s", session_id)
+
 
     async def _transcribe_chunk(self, session_id: str, pcm_data: bytes, offset_ms: int) -> None:
         """Transcribe a single PCM chunk and store segments."""
@@ -374,6 +551,11 @@ class WavesServer:
     async def _list_devices(self, args: dict) -> dict:
         devices = await self.audio.list_devices()
         return {"Devices": devices}
+
+    async def _list_processes(self, args: dict) -> dict:
+        """List processes with active audio output (for tap selection)."""
+        processes = await self.audio.list_processes()
+        return {"Processes": processes}
 
     async def _list_models(self, args: dict) -> dict:
         models = []
@@ -603,6 +785,461 @@ class WavesServer:
 
         return {"Segments": len(segments)}
 
+    # -- Project handlers --
+
+    async def _create_project(self, args: dict) -> dict:
+        name = args.get("Name", "").strip()
+        if not name:
+            raise ValueError("project name required")
+        description = args.get("Description", "")
+        project_id = str(uuid.uuid4())
+        now_ms = int(time.time() * 1000)
+        proj = Project(id=project_id, name=name, created_at=now_ms, description=description)
+        await self.store.create_project(proj)
+        log.info("Created project %s: %s", project_id[:8], name)
+        return {"ProjectID": project_id}
+
+    async def _list_projects(self, args: dict) -> dict:
+        projects = await self.store.list_projects()
+        result = []
+        for p in projects:
+            count = await self.store.project_session_count(p.id)
+            result.append({
+                "ID": p.id,
+                "Name": p.name,
+                "Description": p.description,
+                "CreatedAt": _format_time(p.created_at),
+                "SessionCount": count,
+            })
+        return {"Projects": result}
+
+    async def _get_project(self, args: dict) -> dict:
+        project_id = args.get("ID", "")
+        if not project_id:
+            raise ValueError("project ID required")
+        proj = await self.store.get_project(project_id)
+        if not proj:
+            raise ValueError(f"project not found: {project_id}")
+
+        sessions = await self.store.list_sessions_for_project(project_id)
+        session_rows = []
+        for s in sessions:
+            dur = ""
+            if s.ended_at is not None:
+                dur = _format_duration(s.ended_at - s.started_at)
+            session_rows.append({
+                "ID": s.id,
+                "Title": s.title,
+                "StartedAt": _format_time(s.started_at),
+                "Duration": dur,
+                "Status": s.status,
+            })
+
+        return {
+            "Project": {
+                "ID": proj.id,
+                "Name": proj.name,
+                "Description": proj.description,
+                "CreatedAt": _format_time(proj.created_at),
+                "Sessions": session_rows,
+            }
+        }
+
+    async def _update_project(self, args: dict) -> dict:
+        project_id = args.get("ID", "")
+        if not project_id:
+            raise ValueError("project ID required")
+        proj = await self.store.get_project(project_id)
+        if not proj:
+            raise ValueError(f"project not found: {project_id}")
+
+        if "Name" in args:
+            proj.name = args["Name"].strip()
+        if "Description" in args:
+            proj.description = args["Description"]
+        await self.store.update_project(proj)
+        return {}
+
+    async def _delete_project(self, args: dict) -> dict:
+        project_id = args.get("ID", "")
+        if not project_id:
+            raise ValueError("project ID required")
+        proj = await self.store.get_project(project_id)
+        if not proj:
+            raise ValueError(f"project not found: {project_id}")
+        await self.store.delete_project(project_id)
+        log.info("Deleted project %s", project_id[:8])
+        return {}
+
+    async def _assign_session(self, args: dict) -> dict:
+        session_id = args.get("SessionID", "")
+        project_id = args.get("ProjectID")  # None to unassign
+        if not session_id:
+            raise ValueError("session ID required")
+
+        sess = await self.store.get_session(session_id)
+        if not sess:
+            raise ValueError(f"session not found: {session_id}")
+
+        if project_id:
+            proj = await self.store.get_project(project_id)
+            if not proj:
+                raise ValueError(f"project not found: {project_id}")
+
+        await self.store.assign_session_to_project(session_id, project_id)
+        log.info("Assigned session %s to project %s", session_id[:8], (project_id or "none")[:8])
+        return {}
+
+    async def _set_meeting_type(self, args: dict) -> dict:
+        session_id = args.get("SessionID", "")
+        meeting_type = args.get("MeetingType") or None
+        regenerate = args.get("Regenerate", False)
+        if not session_id:
+            raise ValueError("session ID required")
+
+        sess = await self.store.get_session(session_id)
+        if not sess:
+            raise ValueError(f"session not found: {session_id}")
+
+        await self.store.set_meeting_type(session_id, meeting_type)
+        log.info("Set meeting type for %s to %s", session_id[:8], meeting_type or "none")
+
+        if regenerate and meeting_type:
+            # Delete existing notes and regenerate with the selected template
+            existing_notes = await self.store.get_notes_for_session(sess.id)
+            for note in existing_notes:
+                await self.store.delete_note(note.id)
+                log.info("Deleted note %s for regeneration", note.id[:8])
+
+            # Generate new notes with selected template in background
+            asyncio.create_task(self._auto_generate_notes(sess.id))
+
+        return {}
+
+    async def _list_unassigned_sessions(self, args: dict) -> dict:
+        limit = args.get("Limit", 50)
+        sessions = await self.store.list_unassigned_sessions(limit)
+        result = []
+        for s in sessions:
+            dur = ""
+            if s.ended_at is not None:
+                dur = _format_duration(s.ended_at - s.started_at)
+            result.append({
+                "ID": s.id,
+                "Title": s.title,
+                "StartedAt": _format_time(s.started_at),
+                "Duration": dur,
+                "Status": s.status,
+                "ProjectID": "",
+                "MeetingType": s.meeting_type or "",
+            })
+        return {"Sessions": result, "Count": len(result)}
+
+    # -- Note handlers --
+
+    async def _generate_notes(self, args: dict) -> dict:
+        """Generate meeting notes from a session's transcript using the LLM.
+
+        Supports both template-based generation (NoteType matches a template key
+        like "general-meeting" or "standup") and legacy note types ("action-items",
+        "summary") which use simple prompts.
+        """
+        session_id = args.get("SessionID", "")
+        note_type = args.get("NoteType", "general-meeting")
+        if not session_id:
+            raise ValueError("session ID required")
+        if not self.llm:
+            raise ValueError("no LLM provider configured — set summarization.provider in config")
+
+        sess = await self.store.get_session(session_id)
+        if not sess:
+            raise ValueError(f"session not found: {session_id}")
+
+        transcript = await self.store.full_transcript(session_id)
+        if not transcript:
+            raise ValueError("session has no transcript segments")
+
+        # Check if note_type matches a template
+        template = self.config.note_templates.get(note_type)
+
+        if template:
+            # Two-stage pipeline: enhance → template
+            import datetime
+
+            # Stage 1: Enhance transcript
+            enhancement_model = self.config.summarization.enhancement_model
+            try:
+                enhancer = self._resolve_llm_for_model(enhancement_model)
+                enhanced = await enhance_transcript(
+                    enhancer, transcript,
+                    language_hint=self.config.transcription.language,
+                )
+            except Exception:
+                log.warning("Enhancement failed, using raw transcript", exc_info=True)
+                enhanced = transcript
+
+            # Stage 2: Generate from template
+            summarization_model = self.config.summarization.summarization_model
+            try:
+                summarizer = self._resolve_llm_for_model(summarization_model)
+            except Exception:
+                summarizer = self.llm
+
+            date_str = datetime.datetime.fromtimestamp(
+                sess.started_at / 1000, tz=datetime.timezone.utc
+            ).strftime("%Y-%m-%d %H:%M")
+            dur = ""
+            if sess.ended_at:
+                dur = _format_duration(sess.ended_at - sess.started_at)
+
+            content = await generate_from_template(
+                summarizer, enhanced, template.template,
+                title=sess.title, date=date_str, duration=dur,
+            )
+        else:
+            # Legacy simple prompts for backward compat
+            prompts = {
+                "meeting-notes": (
+                    "Produce well-structured meeting notes in markdown.\n"
+                    "Include: Key Points, Decisions, Action Items, Summary.\n\n"
+                    f"TRANSCRIPT:\n{transcript}"
+                ),
+                "action-items": (
+                    "Extract all action items from this meeting transcript. "
+                    "Format as a markdown checklist with owners and deadlines.\n\n"
+                    f"TRANSCRIPT:\n{transcript}"
+                ),
+                "summary": (
+                    "Provide a concise executive summary in 3-5 bullet points. "
+                    "Focus on outcomes. What would someone who missed the meeting need to know?\n\n"
+                    f"TRANSCRIPT:\n{transcript}"
+                ),
+            }
+            prompt = prompts.get(note_type, prompts["meeting-notes"])
+            content = await self.llm.complete(prompt, system="You are a helpful meeting assistant.")
+
+        now_ms = int(time.time() * 1000)
+        note = Note(
+            id=str(uuid.uuid4()),
+            session_id=session_id,
+            project_id=sess.project_id,
+            content=content,
+            note_type=note_type,
+            created_at=now_ms,
+            updated_at=now_ms,
+        )
+        await self.store.create_note(note)
+        log.info("Generated %s for session %s", note_type, session_id[:8])
+
+        return {
+            "Note": {
+                "ID": note.id,
+                "SessionID": note.session_id,
+                "ProjectID": note.project_id or "",
+                "Content": note.content,
+                "NoteType": note.note_type,
+                "CreatedAt": _format_time(note.created_at),
+                "UpdatedAt": _format_time(note.updated_at),
+            }
+        }
+
+    async def _get_notes(self, args: dict) -> dict:
+        session_id = args.get("SessionID", "")
+        if not session_id:
+            raise ValueError("session ID required")
+        notes = await self.store.get_notes_for_session(session_id)
+        return {
+            "Notes": [
+                {
+                    "ID": n.id,
+                    "SessionID": n.session_id,
+                    "ProjectID": n.project_id or "",
+                    "Content": n.content,
+                    "NoteType": n.note_type,
+                    "CreatedAt": _format_time(n.created_at),
+                    "UpdatedAt": _format_time(n.updated_at),
+                }
+                for n in notes
+            ]
+        }
+
+    async def _update_note(self, args: dict) -> dict:
+        note_id = args.get("ID", "")
+        if not note_id:
+            raise ValueError("note ID required")
+        note = await self.store.get_note(note_id)
+        if not note:
+            raise ValueError(f"note not found: {note_id}")
+
+        if "Content" in args:
+            note.content = args["Content"]
+        if "NoteType" in args:
+            note.note_type = args["NoteType"]
+        note.updated_at = int(time.time() * 1000)
+        await self.store.update_note(note)
+        return {}
+
+    async def _delete_note(self, args: dict) -> dict:
+        note_id = args.get("ID", "")
+        if not note_id:
+            raise ValueError("note ID required")
+        await self.store.delete_note(note_id)
+        return {}
+
+    async def _list_note_templates(self, args: dict) -> dict:
+        """List available note templates."""
+        include_content = args.get("IncludeContent", False)
+        templates = []
+        for key, tmpl in self.config.note_templates.items():
+            entry: dict = {
+                "Key": key,
+                "Name": tmpl.name,
+                "Description": tmpl.description,
+            }
+            if include_content:
+                entry["Template"] = tmpl.template
+            templates.append(entry)
+        return {"Templates": templates}
+
+    async def _edit_note(self, args: dict) -> dict:
+        """AI-powered inline note editing.
+
+        Accepts a note ID, text selection, and user instruction.
+        Returns proposed changes for the user to approve/reject.
+        """
+        note_id = args.get("NoteID", "")
+        selection = args.get("Selection", "")
+        instruction = args.get("Instruction", "")
+        if not note_id:
+            raise ValueError("note ID required")
+        if not selection:
+            raise ValueError("selection required")
+        if not instruction:
+            raise ValueError("instruction required")
+        if not self.llm:
+            raise ValueError("no LLM provider configured")
+
+        note = await self.store.get_note(note_id)
+        if not note:
+            raise ValueError(f"note not found: {note_id}")
+
+        # Find the selection in the note content and extract context
+        content = note.content
+        sel_idx = content.find(selection)
+        if sel_idx < 0:
+            raise ValueError("selection not found in note content")
+
+        # Get ~200 chars of context around the selection
+        ctx_start = max(0, sel_idx - 200)
+        ctx_end = min(len(content), sel_idx + len(selection) + 200)
+        context_before = content[ctx_start:sel_idx]
+        context_after = content[sel_idx + len(selection):ctx_end]
+
+        # Use the fast enhancement model for edits
+        enhancement_model = self.config.summarization.enhancement_model
+        try:
+            editor = self._resolve_llm_for_model(enhancement_model)
+        except Exception:
+            editor = self.llm
+
+        changes = await edit_note_selection(
+            editor, content, selection, instruction,
+            context_before=context_before,
+            context_after=context_after,
+        )
+
+        return {
+            "Changes": [
+                {
+                    "Original": c.original,
+                    "Proposed": c.proposed,
+                    "StartOffset": c.start_offset,
+                    "EndOffset": c.end_offset,
+                }
+                for c in changes
+            ]
+        }
+
+    async def _create_note_template(self, args: dict) -> dict:
+        """Create a new note template and save to config."""
+        from waves.config import NoteTemplate, save_partial
+
+        key = args.get("Key", "")
+        name = args.get("Name", "")
+        description = args.get("Description", "")
+        template = args.get("Template", "")
+        if not key:
+            raise ValueError("template key required")
+        if not name:
+            raise ValueError("template name required")
+        if not template:
+            raise ValueError("template content required")
+
+        tmpl = NoteTemplate(name=name, description=description, template=template)
+        self.config.note_templates[key] = tmpl
+
+        # Persist to YAML
+        save_partial({"note_templates": {
+            key: {"name": name, "description": description, "template": template}
+        }})
+        log.info("Created note template: %s", key)
+        return {"Key": key}
+
+    async def _update_note_template(self, args: dict) -> dict:
+        """Update an existing note template."""
+        from waves.config import NoteTemplate, save_partial
+
+        key = args.get("Key", "")
+        if not key:
+            raise ValueError("template key required")
+        if key not in self.config.note_templates:
+            raise ValueError(f"template not found: {key}")
+
+        existing = self.config.note_templates[key]
+        name = args.get("Name", existing.name)
+        description = args.get("Description", existing.description)
+        template = args.get("Template", existing.template)
+
+        tmpl = NoteTemplate(name=name, description=description, template=template)
+        self.config.note_templates[key] = tmpl
+
+        save_partial({"note_templates": {
+            key: {"name": name, "description": description, "template": template}
+        }})
+        log.info("Updated note template: %s", key)
+        return {}
+
+    async def _delete_note_template(self, args: dict) -> dict:
+        """Delete a note template."""
+        from waves.config import save_partial, default_path
+        import yaml
+
+        key = args.get("Key", "")
+        if not key:
+            raise ValueError("template key required")
+        if key not in self.config.note_templates:
+            raise ValueError(f"template not found: {key}")
+
+        # Don't allow deleting built-in templates
+        from waves.config import DEFAULT_NOTE_TEMPLATES
+        if key in DEFAULT_NOTE_TEMPLATES:
+            raise ValueError(f"cannot delete built-in template: {key}")
+
+        del self.config.note_templates[key]
+
+        # Remove from YAML file
+        cfg_path = default_path()
+        if cfg_path.exists():
+            with open(cfg_path) as f:
+                raw = yaml.safe_load(f) or {}
+            if "note_templates" in raw and key in raw["note_templates"]:
+                del raw["note_templates"][key]
+                with open(cfg_path, "w") as f:
+                    yaml.dump(raw, f, default_flow_style=False, sort_keys=False)
+
+        log.info("Deleted note template: %s", key)
+        return {}
+
     async def _rename_session(self, args: dict) -> dict:
         session_id = args.get("SessionID", "")
         title = args.get("Title", "")
@@ -641,6 +1278,28 @@ class WavesServer:
 
         await self.store.update_session(sess)
         return {"AudioPath": sess.audio_path}
+
+    async def _delete_session(self, args: dict) -> dict:
+        session_id = args.get("SessionID", "")
+        if not session_id:
+            raise ValueError("session ID required")
+
+        sess = await self.store.get_session(session_id)
+        if not sess:
+            raise ValueError(f"session not found: {session_id}")
+
+        audio_path = await self.store.delete_session(sess.id)
+
+        # Try to remove the audio file from disk
+        if audio_path:
+            try:
+                if os.path.exists(audio_path):
+                    os.remove(audio_path)
+                    log.info("Deleted audio file: %s", audio_path)
+            except Exception:
+                log.warning("Failed to delete audio file: %s", audio_path, exc_info=True)
+
+        return {"Deleted": True}
 
 
 # -- Helpers --

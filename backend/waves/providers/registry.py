@@ -82,6 +82,7 @@ def load_builtin_providers() -> None:
     import waves.providers.transcription.openai_whisper  # noqa: F401
     import waves.providers.transcription.deepgram  # noqa: F401
     import waves.providers.transcription.huggingface  # noqa: F401
+    import waves.providers.transcription.mlx  # noqa: F401
 
     # LLM
     import waves.providers.llm.anthropic  # noqa: F401
